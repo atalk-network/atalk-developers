@@ -88,6 +88,8 @@ jobs:
     permissions:
       contents: read
       id-token: write
+    env:
+      NPM_CONFIG_PROVENANCE: "true"
     steps:
       - uses: actions/checkout@v7
       - uses: pnpm/action-setup@v6
@@ -142,14 +144,9 @@ jobs:
           pnpm --dir sdk/node pack --dry-run
       - name: Publish protocol
         run: node scripts/publish-package-if-missing.mjs core/protocol pnpm next
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
       - name: Publish native platform packages and root
         run: node scripts/publish-package-if-missing.mjs core/node-native npm next
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           GITHUB_TOKEN: ${{ github.token }}
       - name: Publish Node SDK
         run: node scripts/publish-package-if-missing.mjs sdk/node pnpm next
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
