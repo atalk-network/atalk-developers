@@ -56,4 +56,4 @@ See the repository `SECURITY.md` for private vulnerability reporting.
 
 ## License
 
-Apache-2.0. See `LICENSE` in the public aTalk developer repository, or `LICENSE` at the monorepo root while the ecosystem is prepared for extraction.
+Apache-2.0. See the repository `LICENSE`.

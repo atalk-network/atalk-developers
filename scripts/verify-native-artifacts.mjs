@@ -24,7 +24,11 @@ async function listFiles(directory) {
   return files;
 }
 
-const actual = new Set((await listFiles(artifactDirectory)).filter((file) => file.endsWith(".node")).map(basename));
+const actual = new Set(
+  (await listFiles(artifactDirectory))
+    .filter((file) => file.endsWith(".node"))
+    .map((file) => basename(file)),
+);
 const missing = [...expected].filter((file) => !actual.has(file));
 const unexpected = [...actual].filter((file) => !expected.has(file));
 
