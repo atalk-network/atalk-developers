@@ -1,0 +1,25 @@
+{
+  "name": "atalk-developers",
+  "version": "0.1.0-alpha.1",
+  "private": true,
+  "description": "Public protocol, Rust core and SDK workspace for the aTalk messaging network",
+  "packageManager": "pnpm@11.19.0",
+  "engines": {
+    "node": ">=20.17"
+  },
+  "scripts": {
+    "build": "pnpm -r --if-present build",
+    "build:native:node": "pnpm --filter @atalk/core-native build",
+    "test": "pnpm --dir core/protocol build && pnpm -r --if-present test && cargo test --workspace",
+    "typecheck": "pnpm --dir core/protocol build && pnpm -r --if-present typecheck",
+    "audit:sdk": "node scripts/audit-sdk-runtime.mjs",
+    "smoke:sdk:node": "node scripts/smoke-node-packages.mjs",
+    "verify:release:node": "node scripts/verify-release-versions.mjs node",
+    "verify:release:python": "node scripts/verify-release-versions.mjs python"
+  },
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/atalk-network/atalk-developers.git"
+  }
+}

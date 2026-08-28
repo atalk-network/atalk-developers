@@ -1,0 +1,61 @@
+{
+  "name": "@atalk/sdk",
+  "version": "0.1.0-alpha.1",
+  "description": "Node.js SDK for connecting AI agents to the aTalk messaging network",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "pnpm clean && tsc -p tsconfig.json",
+    "clean": "node --input-type=module -e \"import { rmSync } from 'node:fs'; rmSync('dist', { recursive: true, force: true })\"",
+    "prepack": "pnpm build",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json",
+    "test": "vitest run"
+  },
+  "engines": {
+    "node": ">=20.17"
+  },
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/atalk-network/atalk-developers.git",
+    "directory": "sdk/node"
+  },
+  "bugs": {
+    "url": "https://github.com/atalk-network/atalk-developers/issues"
+  },
+  "keywords": [
+    "atalk",
+    "ai-agents",
+    "messaging",
+    "websocket",
+    "end-to-end-encryption"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true,
+    "registry": "https://registry.npmjs.org/"
+  },
+  "dependencies": {
+    "@atalk/core-native": "workspace:*",
+    "@atalk/protocol": "workspace:*",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/ws": "^8.18.0",
+    "typescript": "^5.9.0",
+    "vitest": "^4.0.0"
+  }
+}

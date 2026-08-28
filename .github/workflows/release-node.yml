@@ -1,0 +1,155 @@
+name: release-node-sdk
+
+on:
+  push:
+    tags:
+      - "node-v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-node-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  native:
+    name: native-${{ matrix.target }}
+    runs-on: ${{ matrix.host }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - host: macos-latest
+            target: aarch64-apple-darwin
+            command: pnpm --dir core/node-native build --target aarch64-apple-darwin
+          - host: macos-latest
+            target: x86_64-apple-darwin
+            command: pnpm --dir core/node-native build --target x86_64-apple-darwin
+          - host: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            command: pnpm --dir core/node-native build --target x86_64-unknown-linux-gnu --use-napi-cross
+          - host: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            command: pnpm --dir core/node-native build --target aarch64-unknown-linux-gnu --use-napi-cross
+          - host: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            command: pnpm --dir core/node-native build --target x86_64-unknown-linux-musl -x
+            zig: true
+          - host: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            command: pnpm --dir core/node-native build --target aarch64-unknown-linux-musl -x
+            zig: true
+          - host: windows-latest
+            target: x86_64-pc-windows-msvc
+            command: pnpm --dir core/node-native build --target x86_64-pc-windows-msvc
+          - host: windows-latest
+            target: aarch64-pc-windows-msvc
+            command: pnpm --dir core/node-native build --target aarch64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 11.19.0
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.93.1
+          targets: ${{ matrix.target }}
+      - uses: mlugg/setup-zig@v2
+        if: matrix.zig == true
+        with:
+          version: 0.15.2
+      - uses: taiki-e/install-action@v2
+        if: matrix.zig == true
+        with:
+          tool: cargo-zigbuild
+      - name: Install public package dependency graph
+        run: pnpm --filter @atalk/sdk... install --frozen-lockfile
+      - name: Build native binding
+        run: ${{ matrix.command }}
+        shell: bash
+      - name: Upload native binding
+        uses: actions/upload-artifact@v7
+        with:
+          name: bindings-${{ matrix.target }}
+          path: core/node-native/atalk-core-native.*.node
+          if-no-files-found: error
+          retention-days: 3
+
+  publish:
+    name: verify-and-publish
+    needs: native
+    runs-on: ubuntu-latest
+    environment: npm
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 11.19.0
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - name: Install public package dependency graph
+        run: pnpm --filter @atalk/sdk... install --frozen-lockfile
+      - name: Require a public publishing repository
+        run: |
+          visibility=$(curl --fail --silent --show-error \
+            --header "Authorization: Bearer $GITHUB_TOKEN" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY" | jq -r '.private')
+          test "$visibility" = "false"
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+      - name: Download native bindings
+        uses: actions/download-artifact@v8
+        with:
+          pattern: bindings-*
+          path: core/node-native/artifacts
+          merge-multiple: true
+      - name: Verify release versions and artifact set
+        run: |
+          node scripts/verify-release-versions.mjs node "$GITHUB_REF_NAME"
+          node scripts/verify-native-artifacts.mjs core/node-native/artifacts
+      - name: Build and test protocol
+        run: |
+          pnpm --dir core/protocol build
+          pnpm --dir core/protocol test
+      - name: Assemble native platform packages
+        run: |
+          pnpm --dir core/node-native exec napi create-npm-dirs
+          pnpm --dir core/node-native exec napi artifacts --output-dir artifacts --npm-dir npm
+          node --test core/node-native/test/*.test.mjs
+      - name: Build and test Node SDK
+        run: |
+          pnpm --dir sdk/node build
+          pnpm --dir sdk/node typecheck
+          pnpm --dir sdk/node test
+          pnpm audit:sdk
+      - name: Preview root package contents without lifecycle side effects
+        run: |
+          node scripts/native-package-licenses.mjs stage
+          npm pack --dry-run --ignore-scripts --prefix core/node-native
+          pnpm --dir core/protocol pack --dry-run
+          pnpm --dir sdk/node pack --dry-run
+      - name: Publish protocol
+        run: pnpm --dir core/protocol publish --access public --tag next --no-git-checks
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: Publish native platform packages and root
+        run: npm publish --prefix core/node-native --access public --tag next
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
+      - name: Publish Node SDK
+        run: pnpm --dir sdk/node publish --access public --tag next --no-git-checks
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

@@ -1,0 +1,71 @@
+name: release-python-sdk
+
+on:
+  push:
+    tags:
+      - "python-v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-python-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: sdk/python/pyproject.toml
+      - name: Verify release version
+        run: node scripts/verify-release-versions.mjs python "$GITHUB_REF_NAME"
+      - name: Require a public publishing repository
+        run: |
+          visibility=$(curl --fail --silent --show-error \
+            --header "Authorization: Bearer $GITHUB_TOKEN" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY" | jq -r '.private')
+          test "$visibility" = "false"
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+      - name: Build and test
+        run: |
+          python -m pip install --upgrade build pip-audit twine
+          python -m pip_audit sdk/python
+          python -m pip install -e 'sdk/python[test]'
+          python -m pytest sdk/python/tests
+          python -m build sdk/python
+          python -m twine check sdk/python/dist/*
+      - uses: actions/upload-artifact@v7
+        with:
+          name: python-package-distributions
+          path: sdk/python/dist/
+          if-no-files-found: error
+          retention-days: 3
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/atalk-sdk
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: python-package-distributions
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
+          attestations: true

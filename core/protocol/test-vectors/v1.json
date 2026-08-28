@@ -1,0 +1,21 @@
+{
+  "plaintext": "Hola desde aTalk",
+  "sender_signing_public_key": "ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ",
+  "sender_signing_secret_seed": "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA",
+  "sender_encryption_public_key": "WGmv9FBUlzLLqu1eXfmzCm2jHLDldCutWtShp2jxpns",
+  "sender_encryption_secret_key": "ISIjJCUmJygpKissLS4vMDEyMzQ1Njc4OTo7PD0-P0A",
+  "recipient_encryption_secret_key": "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVpbXF1eX2A",
+  "recipient_encryption_public_key": "ZLEBsdC-WocEvQePmJUAH8A-jp-VIvGI3RKNmEbUhGY",
+  "envelope": {
+    "version": 1,
+    "message_id": "11111111-1111-4111-8111-111111111111",
+    "conversation_id": "22222222-2222-4222-8222-222222222222",
+    "sender_peer_id": "33333333-3333-4333-8333-333333333333",
+    "recipient_peer_id": "44444444-4444-4444-8444-444444444444",
+    "timestamp": "2026-08-28T12:00:00.000Z",
+    "type": "TEXT",
+    "nonce": "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcY",
+    "ciphertext": "SpfdyEzVRhJWr9rqciovx7Q_Uj1wRLNC-1fKE8AwljM",
+    "signature": "Jy7_3tKLjwihkv1u5E77BY2_UMvjpxiiYqCxBH_GShT3KjNqKTPbW0XZaeCD5-roCmQVK1xhbbGF8gj8r_0RCw"
+  }
+}

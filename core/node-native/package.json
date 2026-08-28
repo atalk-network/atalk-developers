@@ -1,0 +1,62 @@
+{
+  "name": "@atalk/core-native",
+  "version": "0.1.0-alpha.1",
+  "description": "Prebuilt Rust cryptography and authorization core for aTalk Node.js clients",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "README.md"
+  ],
+  "scripts": {
+    "artifacts": "napi artifacts",
+    "build": "napi build --platform --release",
+    "build:debug": "napi build --platform",
+    "create-npm-dirs": "napi create-npm-dirs",
+    "prepack": "node ../../scripts/native-package-licenses.mjs stage",
+    "postpack": "node ../../scripts/native-package-licenses.mjs clean",
+    "prepublishOnly": "node ../../scripts/native-package-licenses.mjs stage && napi prepublish -t npm --no-gh-release",
+    "test": "pnpm run build && node --test test/*.test.mjs"
+  },
+  "napi": {
+    "binaryName": "atalk-core-native",
+    "targets": [
+      "aarch64-apple-darwin",
+      "x86_64-apple-darwin",
+      "x86_64-unknown-linux-gnu",
+      "aarch64-unknown-linux-gnu",
+      "x86_64-unknown-linux-musl",
+      "aarch64-unknown-linux-musl",
+      "x86_64-pc-windows-msvc",
+      "aarch64-pc-windows-msvc"
+    ]
+  },
+  "engines": {
+    "node": ">=20.17"
+  },
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/atalk-network/atalk-developers.git",
+    "directory": "core/node-native"
+  },
+  "bugs": {
+    "url": "https://github.com/atalk-network/atalk-developers/issues"
+  },
+  "keywords": [
+    "atalk",
+    "napi-rs",
+    "rust",
+    "cryptography",
+    "node-addon"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true,
+    "registry": "https://registry.npmjs.org/"
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "^3.8.6"
+  }
+}
