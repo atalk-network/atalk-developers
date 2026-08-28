@@ -4,7 +4,8 @@
 
 - The backend never receives private keys or plaintext message content.
 - Every peer has independent signing and encryption keys.
-- Every agent has a traceable human or organization owner.
+- Every agent has exactly one explicit human or organization owner, distinct from its immutable human creator audit record.
+- Agents cannot self-assign or change ownership during activation; the server binds the one-time credential to the pending agent record.
 - Agent activation credentials are random, single-use and stored only as hashes.
 - Opaque sessions are random, revocable and stored only as hashes.
 - Permission is a deny-by-default intersection; a peer cannot override a stricter organization policy.

@@ -13,7 +13,7 @@ const human = (id: string, organizations: string[] = []): PublicPeer => ({
   membershipOrganizationIds: organizations,
 });
 
-const agent = (id: string, organizationId: string, ownerPeerId: string): PublicPeer => ({
+const organizationAgent = (id: string, organizationId: string): PublicPeer => ({
   id,
   type: "AGENT",
   status: "ACTIVE",
@@ -22,14 +22,24 @@ const agent = (id: string, organizationId: string, ownerPeerId: string): PublicP
   signingPublicKey: "key",
   encryptionPublicKey: "key",
   organizationId,
-  ownerPeerId,
+});
+
+const personalAgent = (id: string, personalOwnerPeerId: string): PublicPeer => ({
+  id,
+  type: "AGENT",
+  status: "ACTIVE",
+  handle: `@agent.${id.slice(0, 2)}`,
+  displayName: "Agent",
+  signingPublicKey: "key",
+  encryptionPublicKey: "key",
+  personalOwnerPeerId,
 });
 
 describe("permission intersection", () => {
   it("allows an organization member to message an organization-only agent", () => {
     const organizationId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
     const sender = human("11111111-1111-4111-8111-111111111111", [organizationId]);
-    const recipient = agent("22222222-2222-4222-8222-222222222222", organizationId, sender.id);
+    const recipient = organizationAgent("22222222-2222-4222-8222-222222222222", organizationId);
     expect(
       evaluatePermission({
         sender,
@@ -41,15 +51,13 @@ describe("permission intersection", () => {
   });
 
   it("requires the organization to allow external agent traffic", () => {
-    const sales = agent(
+    const sales = organizationAgent(
       "22222222-2222-4222-8222-222222222222",
       "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-      "11111111-1111-4111-8111-111111111111",
     );
-    const finance = agent(
+    const finance = organizationAgent(
       "33333333-3333-4333-8333-333333333333",
       "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
-      "44444444-4444-4444-8444-444444444444",
     );
     const openAgent = {
       ...DEFAULT_AGENT_POLICY,
@@ -71,10 +79,9 @@ describe("permission intersection", () => {
 
   it("denies a blocked peer before broader network policy", () => {
     const sender = human("11111111-1111-4111-8111-111111111111");
-    const recipient = agent(
+    const recipient = organizationAgent(
       "22222222-2222-4222-8222-222222222222",
       "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-      "33333333-3333-4333-8333-333333333333",
     );
     expect(
       evaluatePermission({
@@ -88,5 +95,29 @@ describe("permission intersection", () => {
         recipientBlockedSender: true,
       }),
     ).toEqual({ allowed: false, code: "BLOCKED" });
+  });
+
+  it("matches OWNER_ONLY only for the explicit personal owner", () => {
+    const owner = human("11111111-1111-4111-8111-111111111111");
+    const recipient = personalAgent("22222222-2222-4222-8222-222222222222", owner.id);
+    expect(evaluatePermission({
+      sender: owner,
+      recipient,
+      recipientAgentPolicy: DEFAULT_AGENT_POLICY,
+    })).toEqual({ allowed: true });
+  });
+
+  it("does not treat an organization agent creator as its owner", () => {
+    const creator = human("11111111-1111-4111-8111-111111111111");
+    const recipient = organizationAgent(
+      "22222222-2222-4222-8222-222222222222",
+      "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    );
+    expect(evaluatePermission({
+      sender: creator,
+      recipient,
+      recipientAgentPolicy: DEFAULT_AGENT_POLICY,
+      recipientOrganizationPolicy: DEFAULT_ORGANIZATION_POLICY,
+    })).toEqual({ allowed: false, code: "INCOMING_SCOPE_DENIED" });
   });
 });

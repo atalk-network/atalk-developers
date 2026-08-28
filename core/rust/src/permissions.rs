@@ -35,7 +35,7 @@ fn scope_allows(
     selected_peer_ids: &[Uuid],
 ) -> bool {
     match scope {
-        CommunicationScope::OwnerOnly => agent.owner_peer_id == Some(counterpart.id),
+        CommunicationScope::OwnerOnly => agent.personal_owner_peer_id == Some(counterpart.id),
         CommunicationScope::OrganizationOnly => agent
             .organization_id
             .is_some_and(|organization_id| belongs_to_organization(counterpart, organization_id)),

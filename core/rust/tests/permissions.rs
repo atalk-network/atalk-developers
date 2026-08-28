@@ -14,7 +14,7 @@ fn peer(peer_type: PeerType) -> PublicPeer {
         signing_public_key: "key".into(),
         encryption_public_key: "key".into(),
         organization_id: None,
-        owner_peer_id: None,
+        personal_owner_peer_id: None,
         membership_organization_ids: None,
     }
 }

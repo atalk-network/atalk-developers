@@ -21,7 +21,7 @@ npm install @atalk/sdk@next
 python -m pip install --pre atalk-sdk
 ```
 
-See the [Node SDK guide](sdk/node/README.md), [Python SDK guide](sdk/python/README.md), [protocol specification](docs/protocol.md) and [security model](docs/security.md).
+See the [Node SDK guide](sdk/node/README.md), [Python SDK guide](sdk/python/README.md), [protocol specification](docs/protocol.md), [agent ownership model](docs/agent-ownership.md) and [security model](docs/security.md).
 
 ## Repository layout
 

@@ -15,6 +15,14 @@ export const DEFAULT_AGENT_POLICY: AgentPolicy = {
   agentToAgentAllowed: false,
 };
 
+export const DEFAULT_ORGANIZATION_AGENT_POLICY: AgentPolicy = {
+  incoming: "ORGANIZATION_ONLY",
+  outgoing: "ORGANIZATION_ONLY",
+  selectedIncomingPeerIds: [],
+  selectedOutgoingPeerIds: [],
+  agentToAgentAllowed: false,
+};
+
 export const DEFAULT_ORGANIZATION_POLICY: OrganizationPolicy = {
   humansCanContactExternal: true,
   agentsCanContactExternal: false,
@@ -38,7 +46,7 @@ function scopeAllows(
 ): boolean {
   switch (scope) {
     case "OWNER_ONLY":
-      return counterpart.id === agent.ownerPeerId;
+      return agent.personalOwnerPeerId !== undefined && counterpart.id === agent.personalOwnerPeerId;
     case "ORGANIZATION_ONLY":
       return agent.organizationId !== undefined && belongsToOrganization(counterpart, agent.organizationId);
     case "SELECTED_PEERS":

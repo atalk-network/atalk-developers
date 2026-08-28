@@ -14,10 +14,15 @@ export const publicPeerSchema = z
     signingPublicKey: base64Url,
     encryptionPublicKey: base64Url,
     organizationId: uuid.optional(),
-    ownerPeerId: uuid.optional(),
+    personalOwnerPeerId: uuid.optional(),
     membershipOrganizationIds: z.array(uuid).optional(),
   })
   .strict();
+
+export const agentOwnershipSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("PERSONAL"), humanPeerId: uuid }).strict(),
+  z.object({ kind: z.literal("ORGANIZATION"), organizationId: uuid }).strict(),
+]);
 
 export const unsignedEnvelopeSchema = z
   .object({

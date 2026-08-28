@@ -40,7 +40,7 @@ pub struct PublicPeer {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub organization_id: Option<Uuid>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub owner_peer_id: Option<Uuid>,
+    pub personal_owner_peer_id: Option<Uuid>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub membership_organization_ids: Option<Vec<Uuid>>,
 }

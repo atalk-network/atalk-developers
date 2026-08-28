@@ -22,6 +22,10 @@ export const COMMUNICATION_SCOPES = [
 ] as const;
 export type CommunicationScope = (typeof COMMUNICATION_SCOPES)[number];
 
+export type AgentOwnership =
+  | { kind: "PERSONAL"; humanPeerId: string }
+  | { kind: "ORGANIZATION"; organizationId: string };
+
 export interface PublicPeer {
   id: string;
   type: PeerType;
@@ -31,7 +35,7 @@ export interface PublicPeer {
   signingPublicKey: string;
   encryptionPublicKey: string;
   organizationId?: string;
-  ownerPeerId?: string;
+  personalOwnerPeerId?: string;
   membershipOrganizationIds?: string[];
 }
 
