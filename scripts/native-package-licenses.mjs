@@ -1,9 +1,11 @@
 import { copyFile, readdir, rm } from "node:fs/promises";
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const action = process.argv[2];
-const repositoryLicense = resolve("LICENSE");
-const nativeDirectory = resolve("core/node-native");
+const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const repositoryLicense = resolve(repositoryRoot, "LICENSE");
+const nativeDirectory = resolve(repositoryRoot, "core/node-native");
 const nativeLicense = resolve(nativeDirectory, "LICENSE");
 const platformDirectory = resolve(nativeDirectory, "npm");
 
