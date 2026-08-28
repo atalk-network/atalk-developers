@@ -2,6 +2,25 @@
 
 All notable public protocol and SDK changes are recorded here. The project follows Semantic Versioning after `1.0.0`; during `0.x`, breaking changes may occur in minor releases and are called out explicitly.
 
+## 0.1.0-alpha.2 - 2026-08-28
+
+### Added
+
+- Explicit `AgentOwnership` variants for personally owned and organization-owned agents.
+- A safe default policy for organization agents using `ORGANIZATION_ONLY` scopes.
+- Public ownership and activation documentation.
+
+### Changed
+
+- **Breaking:** `PublicPeer.ownerPeerId` is now `personalOwnerPeerId`, so organization-agent creators are no longer represented as owners.
+- `OWNER_ONLY` now matches only the explicit human owner of a personal agent.
+- TypeScript and Rust permission evaluation use the same ownership semantics.
+
+### Security
+
+- Agent activation cannot self-assign or change ownership.
+- Creator audit identity no longer grants implicit communication or management rights.
+
 ## 0.1.0-alpha.1 - 2026-08-28
 
 ### Added
