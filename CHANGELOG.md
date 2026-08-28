@@ -2,7 +2,7 @@
 
 All notable public protocol and SDK changes are recorded here. The project follows Semantic Versioning after `1.0.0`; during `0.x`, breaking changes may occur in minor releases and are called out explicitly.
 
-## 0.1.0-alpha.1 - Unreleased
+## 0.1.0-alpha.1 - 2026-08-28
 
 ### Added
 
