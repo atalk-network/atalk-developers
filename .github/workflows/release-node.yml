@@ -137,19 +137,19 @@ jobs:
       - name: Preview root package contents without lifecycle side effects
         run: |
           node scripts/native-package-licenses.mjs stage
-          npm pack --dry-run --ignore-scripts --prefix core/node-native
+          npm pack ./core/node-native --dry-run --ignore-scripts
           pnpm --dir core/protocol pack --dry-run
           pnpm --dir sdk/node pack --dry-run
       - name: Publish protocol
-        run: pnpm --dir core/protocol publish --access public --tag next --no-git-checks
+        run: node scripts/publish-package-if-missing.mjs core/protocol pnpm next
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
       - name: Publish native platform packages and root
-        run: npm publish --prefix core/node-native --access public --tag next
+        run: node scripts/publish-package-if-missing.mjs core/node-native npm next
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           GITHUB_TOKEN: ${{ github.token }}
       - name: Publish Node SDK
-        run: pnpm --dir sdk/node publish --access public --tag next --no-git-checks
+        run: node scripts/publish-package-if-missing.mjs sdk/node pnpm next
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
