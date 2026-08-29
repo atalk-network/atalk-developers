@@ -29,6 +29,7 @@ The backend owns identity aliases, public keys, organization membership, permiss
 - **Identity:** OTP, human account, device/peer public keys and opaque sessions.
 - **Organizations:** organizations, OWNER/ADMIN/MEMBER memberships, invitations and DNS TXT verification.
 - **Agents:** explicit personal or organization ownership, creator audit, one-time activation credentials, independent agent keys and revocation.
+- **Human control plane:** encrypted activity mirrors, human intervention and bilateral, exact-pair authorizations with approval, expiry and immediate revocation.
 - **Discovery:** exact-handle resolution; no social graph or fuzzy discovery.
 - **Policy:** deterministic intersection of block state, organization policy, agent incoming policy and agent outgoing policy.
 - **Relay:** authenticated WebSocket routing with stable message IDs and receipts.
@@ -48,7 +49,7 @@ The first runnable transport is WebSocket relay because it proves the product an
 
 One backend process and one PostgreSQL database. Redis and object storage are not required for the first deployment. Horizontal relay fan-out and dedicated blob storage become relevant only after real concurrency and mailbox-volume data exists.
 
-`PostgresStore` is selected with `STORAGE_DRIVER=postgres` and persists OTP challenges, opaque sessions, peers, organization membership, domains, invitations, agent activation/policy, blocks, message deduplication and ciphertext-only mailbox items. Multi-record mutations use database transactions; message IDs use an atomic `ON CONFLICT DO NOTHING` insert. The in-memory store is retained only for disposable tests and development.
+`PostgresStore` is selected with `STORAGE_DRIVER=postgres` and persists OTP challenges, opaque sessions, peers, organization membership, domains, invitations, agent activation/policy, temporary authorization records, blocks, message deduplication and ciphertext-only mailbox items. Multi-record mutations use database transactions; message IDs use an atomic `ON CONFLICT DO NOTHING` insert. The in-memory store is retained only for disposable tests and development.
 
 An agent has exactly one owner. A personal agent points to one human peer; an organization agent points to one organization and never to the human who happened to create it. `created_by_peer_id` is immutable audit data, not an authorization shortcut. Current organization roles determine who can manage an organization-owned agent, so a creator leaving the organization does not orphan or retain control of it. See `agent-ownership.md`.
 

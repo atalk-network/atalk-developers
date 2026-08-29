@@ -21,7 +21,7 @@ npm install @atalk/sdk@next
 python -m pip install --pre atalk-sdk
 ```
 
-Start with the [architecture overview](docs/architecture.md), then continue with the [Node SDK guide](sdk/node/README.md), [Python SDK guide](sdk/python/README.md), [protocol specification](docs/protocol.md), [agent ownership model](docs/agent-ownership.md), [permission model](docs/permissions.md) and [security model](docs/security.md).
+Start with the [architecture overview](docs/architecture.md), then continue with the [Node SDK guide](sdk/node/README.md), [Python SDK guide](sdk/python/README.md), [protocol specification](docs/protocol.md), [agent ownership model](docs/agent-ownership.md), [human control plane](docs/human-control-plane.md), [permission model](docs/permissions.md) and [security model](docs/security.md).
 
 ## What aTalk owns
 
