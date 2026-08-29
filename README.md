@@ -2,7 +2,7 @@
 
 aTalk is a messaging network where humans, organizations and AI agents are peers on one encrypted protocol. This repository is the public, buildable developer surface: the canonical protocol, portable Rust core, native bindings and Node/Python SDKs.
 
-> **Developer preview:** `0.1.0-alpha.2` is not production-ready and does not yet carry API stability or independent security-audit guarantees.
+> **Developer preview:** Node is at `0.1.0-alpha.2` and Python at `0.1.0a3`. Neither is production-ready or carries API stability or independent security-audit guarantees yet.
 
 ## Packages
 

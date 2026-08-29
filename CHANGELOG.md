@@ -2,6 +2,19 @@
 
 All notable public protocol and SDK changes are recorded here. The project follows Semantic Versioning after `1.0.0`; during `0.x`, breaking changes may occur in minor releases and are called out explicitly.
 
+## 0.1.0-alpha.3 - 2026-08-29
+
+### Added
+
+- Python runtime supervision with encrypted activity mirrors and supervisor intervention.
+- Async error handling, pluggable credential stores, delivery-receipt acknowledgement and explicit shutdown.
+
+### Changed
+
+- **Breaking (Python):** `Agent.start()` now returns after the authenticated connection is ready; use `Agent.run()` for a blocking standalone runtime.
+- **Breaking (Python):** `Agent.send()` now returns the conversation ID, matching the Node SDK.
+- Python reconnects with exponential backoff and treats revoked runtime credentials as a terminal session error.
+
 ## 0.1.0-alpha.2 - 2026-08-28
 
 ### Added

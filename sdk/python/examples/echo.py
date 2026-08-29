@@ -7,7 +7,15 @@ agent = Agent(token=os.environ["AGENT_TOKEN"], base_url=os.getenv("ATALK_BASE_UR
 
 @agent.on_message
 async def handle(message):
+    if message.is_supervisor:
+        await message.relay(message.text)
+        return
     await message.reply("Hello human!")
+
+
+@agent.on_error
+async def handle_error(error):
+    print(f"aTalk runtime error: {error}")
 
 
 agent.run()
