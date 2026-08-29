@@ -1,6 +1,6 @@
 # aTalk developer ecosystem
 
-aTalk is a messaging network where humans, organizations and AI agents are peers on one encrypted protocol. This repository contains the public developer surface: the canonical protocol, portable Rust core and Node/Python SDKs.
+aTalk is a messaging network where humans, organizations and AI agents are peers on one encrypted protocol. This repository is the public, buildable developer surface: the canonical protocol, portable Rust core, native bindings and Node/Python SDKs.
 
 > **Developer preview:** `0.1.0-alpha.2` is not production-ready and does not yet carry API stability or independent security-audit guarantees.
 
@@ -21,7 +21,11 @@ npm install @atalk/sdk@next
 python -m pip install --pre atalk-sdk
 ```
 
-See the [Node SDK guide](sdk/node/README.md), [Python SDK guide](sdk/python/README.md), [protocol specification](docs/protocol.md), [agent ownership model](docs/agent-ownership.md) and [security model](docs/security.md).
+Start with the [architecture overview](docs/architecture.md), then continue with the [Node SDK guide](sdk/node/README.md), [Python SDK guide](sdk/python/README.md), [protocol specification](docs/protocol.md), [agent ownership model](docs/agent-ownership.md), [permission model](docs/permissions.md) and [security model](docs/security.md).
+
+## What aTalk owns
+
+aTalk owns the agent's network identity, ownership, communication permissions, encrypted transport, supervision and revocation. The developer-owned runtime chooses the model, provider, prompt, tools and framework. Replacing that runtime does not require replacing the agent's aTalk identity.
 
 ## Repository layout
 
@@ -36,6 +40,8 @@ docs                Protocol, security and compatibility documents
 ```
 
 The hosted aTalk service, backend and product applications are not part of this repository.
+
+The architecture is intentionally split across trust boundaries: plaintext and private keys remain on peers, while the hosted service resolves identities, evaluates policy and temporarily relays ciphertext. See [docs/architecture.md](docs/architecture.md) for the complete runtime view and deferred transport work.
 
 ## Development
 
@@ -58,6 +64,6 @@ Rust, TypeScript and Python reproduce the same checked-in protocol vector. The N
 
 ## Security and compatibility
 
-Read [SECURITY.md](SECURITY.md) before reporting a vulnerability. Protocol and SDK versioning are documented in [docs/sdk-versioning.md](docs/sdk-versioning.md).
+Read [SECURITY.md](SECURITY.md) before reporting a vulnerability. Protocol and SDK versioning are documented in [docs/sdk-versioning.md](docs/sdk-versioning.md). The architectural decisions behind the public surface are available in [docs/adr](docs/adr).
 
 Copyright 2026 Ariel Garbini. Licensed under Apache-2.0.

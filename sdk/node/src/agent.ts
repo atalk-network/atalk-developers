@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import {
+  encodeAgentActivity,
   serverFrameSchema,
   type EncryptedEnvelope,
   type PublicPeer,
@@ -14,6 +15,7 @@ export interface AgentOptions {
   baseUrl?: string;
   credentialStore?: CredentialStore;
   credentialPath?: string;
+  supervision?: boolean;
 }
 
 export interface IncomingMessage {
@@ -22,7 +24,9 @@ export interface IncomingMessage {
   text: string;
   sender: PublicPeer;
   receivedAt: Date;
+  isSupervisor: boolean;
   reply(text: string): Promise<void>;
+  relay(text: string): Promise<void>;
 }
 
 type MessageHandler = (message: IncomingMessage) => void | Promise<void>;
@@ -32,16 +36,20 @@ export class Agent {
   private readonly baseUrl: string;
   private readonly activationToken: string;
   private readonly credentialStore: CredentialStore;
+  private readonly supervisionEnabled: boolean;
   private credentials?: AgentCredentials;
   private socket?: WebSocket;
   private stopped = false;
   private messageHandler?: MessageHandler;
   private errorHandler?: ErrorHandler;
+  private supervisors: PublicPeer[] = [];
+  private readonly counterparties = new Map<string, PublicPeer>();
 
   constructor(options: AgentOptions) {
     this.activationToken = options.token;
     this.baseUrl = (options.baseUrl ?? "http://127.0.0.1:4001").replace(/\/$/u, "");
     this.credentialStore = options.credentialStore ?? new FileCredentialStore(options.token, options.credentialPath);
+    this.supervisionEnabled = options.supervision ?? true;
   }
 
   on(event: "message", handler: MessageHandler): this;
@@ -55,6 +63,10 @@ export class Agent {
   async start(): Promise<void> {
     this.stopped = false;
     this.credentials = (await this.credentialStore.load()) ?? (await this.activate());
+    if (this.supervisionEnabled) {
+      const result = await this.request<{ supervisors: PublicPeer[] }>("/v1/agent-runtime/supervisors");
+      this.supervisors = result.supervisors;
+    }
     await this.connect();
   }
 
@@ -64,7 +76,9 @@ export class Agent {
   }
 
   async send(recipientHandle: string, text: string): Promise<string> {
-    return this.sendEnvelope(recipientHandle, text, randomUUID());
+    const conversationId = randomUUID();
+    await this.sendEnvelope(recipientHandle, text, conversationId);
+    return conversationId;
   }
 
   private async activate(): Promise<AgentCredentials> {
@@ -98,21 +112,39 @@ export class Agent {
 
       socket.on("open", () => socket.send(JSON.stringify({ kind: "AUTH", token: credentials.sessionToken })));
       socket.on("message", (raw) => {
-        void this.handleFrame(serverFrameSchema.parse(JSON.parse(raw.toString()))).then(() => {
-          if (!ready && this.socket === socket) {
+        const frame = serverFrameSchema.parse(JSON.parse(raw.toString()));
+        void this.handleFrame(frame).then(() => {
+          if (frame.kind === "READY" && !ready && this.socket === socket) {
             ready = true;
             clearTimeout(timeout);
             resolve();
           }
-        }).catch((error: unknown) => this.emitError(error));
+        }).catch((error: unknown) => {
+          if (!ready) {
+            clearTimeout(timeout);
+            reject(error);
+            socket.close();
+          } else {
+            this.emitError(error);
+          }
+        });
       });
       socket.on("error", (error) => {
         clearTimeout(timeout);
         if (!ready) reject(error);
         else this.emitError(error);
       });
-      socket.on("close", () => {
+      socket.on("close", (code) => {
         clearTimeout(timeout);
+        if (!ready) {
+          reject(new Error(code === 4001 || code === 1008 ? "INVALID_SESSION: Agent credentials were revoked" : "aTalk connection closed before authentication"));
+          return;
+        }
+        if (code === 4001 || code === 1008) {
+          this.stopped = true;
+          this.emitError(new Error("INVALID_SESSION: Agent credentials were revoked"));
+          return;
+        }
         if (!this.stopped && ready) setTimeout(() => void this.connect().catch((error) => this.emitError(error)), 1_000);
       });
     });
@@ -133,6 +165,11 @@ export class Agent {
       senderEncryptionPublicKey: sender.encryptionPublicKey,
       recipientEncryptionSecretKey: credentials.keys.encryptionSecretKey,
     });
+    const isSupervisor = this.supervisors.some((supervisor) => supervisor.id === sender.id);
+    if (!isSupervisor) {
+      this.counterparties.set(frame.envelope.conversation_id, sender);
+      await this.mirrorActivity("INCOMING", sender, text, frame.envelope.conversation_id, frame.envelope.message_id, frame.envelope.timestamp);
+    }
     this.sendFrame({ kind: "ACK", messageId: frame.envelope.message_id, state: "DELIVERED" });
     if (this.messageHandler) {
       await this.messageHandler({
@@ -141,8 +178,15 @@ export class Agent {
         text,
         sender,
         receivedAt: new Date(frame.envelope.timestamp),
+        isSupervisor,
         reply: async (replyText) => {
           await this.sendEnvelope(sender.handle, replyText, frame.envelope.conversation_id);
+        },
+        relay: async (relayText) => {
+          if (!isSupervisor) throw new Error("Only supervisor messages can be relayed");
+          const counterparty = this.counterparties.get(frame.envelope.conversation_id);
+          if (!counterparty) throw new Error("No active counterparty exists for this supervised conversation");
+          await this.sendEnvelope(counterparty.handle, relayText, frame.envelope.conversation_id);
         },
       });
     }
@@ -167,7 +211,51 @@ export class Agent {
       recipientEncryptionPublicKey: recipient.encryptionPublicKey,
     });
     this.sendFrame({ kind: "DELIVER", envelope });
+    const isSupervisor = this.supervisors.some((supervisor) => supervisor.id === recipient.id);
+    if (!isSupervisor) {
+      this.counterparties.set(conversationId, recipient);
+      await this.mirrorActivity("OUTGOING", recipient, text, conversationId, envelope.message_id, envelope.timestamp);
+    }
     return envelope.message_id;
+  }
+
+  private async mirrorActivity(
+    direction: "INCOMING" | "OUTGOING",
+    counterparty: PublicPeer,
+    text: string,
+    conversationId: string,
+    sourceMessageId: string,
+    observedAt: string,
+  ): Promise<void> {
+    if (!this.supervisionEnabled || this.supervisors.length === 0) return;
+    const credentials = this.requireCredentials();
+    const plaintext = encodeAgentActivity({
+      version: 1,
+      kind: "AGENT_ACTIVITY",
+      agentPeerId: credentials.peer.id,
+      agentHandle: credentials.peer.handle,
+      counterpartyPeerId: counterparty.id,
+      counterpartyHandle: counterparty.handle,
+      counterpartyDisplayName: counterparty.displayName,
+      direction,
+      sourceMessageId,
+      observedAt,
+      text,
+    });
+    for (const supervisor of this.supervisors) {
+      const envelope = encryptTextNative({
+        messageId: randomUUID(),
+        conversationId,
+        senderPeerId: credentials.peer.id,
+        recipientPeerId: supervisor.id,
+        timestamp: new Date().toISOString(),
+        plaintext,
+        senderSigningSecretKey: credentials.keys.signingSecretKey,
+        senderEncryptionSecretKey: credentials.keys.encryptionSecretKey,
+        recipientEncryptionPublicKey: supervisor.encryptionPublicKey,
+      });
+      this.sendFrame({ kind: "DELIVER", envelope });
+    }
   }
 
   private sendFrame(frame: object): void {

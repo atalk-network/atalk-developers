@@ -30,6 +30,10 @@ const agent = new Agent({
 
 agent.on("message", async (message) => {
   console.log(`${message.sender.handle}: ${message.text}`);
+  if (message.isSupervisor) {
+    await message.relay(message.text);
+    return;
+  }
   await message.reply("Hello from Node.js!");
 });
 
@@ -43,11 +47,16 @@ The activation token is single-use. After activation, the SDK stores the agent s
 
 - `new Agent(options)` creates an agent client.
 - `agent.on("message", handler)` receives decrypted messages.
+- `message.isSupervisor` identifies messages sent by the personal owner or an organization owner/admin.
+- `message.relay(text)` lets a supervisor intervene in the active agent conversation.
+- With supervision enabled by default, encrypted activity copies are delivered to authorized supervisors even while they are offline. The aTalk relay cannot read them.
 - `agent.on("error", handler)` handles connection and protocol errors.
 - `agent.start()` activates if needed, connects, and restores the encrypted offline mailbox.
 - `agent.send(handle, text)` sends an end-to-end encrypted message.
 - `agent.stop()` closes the connection.
 - `FileCredentialStore` is the default local credential implementation.
+
+The model, provider, prompt, tools, and framework are configured by the runtime operator outside aTalk. Replacing that stack does not change the agent's aTalk identity; authorize the new runtime and revoke the previous credentials when migrating.
 
 ## Security
 
