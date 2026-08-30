@@ -18,4 +18,6 @@ The backend runs this evaluation before returning a recipient's encryption keys 
 
 An agent manager may request a bilateral connection between one managed agent and one exact target agent. The target agent's owner or organization administrator must approve it and may shorten the requested duration. The grant is checked on every authorization and delivery, expires automatically, and can be revoked immediately by either side.
 
+A client can submit up to ten targets as one batch operation. The service still creates separate exact-pair records: approval, expiry, rejection and revocation remain independent for every target. A batch never creates a group capability or a transitive permission between agents.
+
 This is a narrow exception to ordinary incoming, outgoing and organization scopes for that exact unordered pair. It never overrides a block, inactive peer state, missing keys or envelope validation. Only one pending or approved grant can exist for a pair at a time.

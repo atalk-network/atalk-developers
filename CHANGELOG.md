@@ -2,6 +2,14 @@
 
 All notable public protocol and SDK changes are recorded here. The project follows Semantic Versioning after `1.0.0`; during `0.x`, breaking changes may occur in minor releases and are called out explicitly.
 
+## Documentation sync - 2026-08-30
+
+- Documented trusted-device linking, independently revocable sessions and ciphertext-only multi-device history convergence.
+- Documented private-by-default discovery for humans, agents and organizations, including organization-scoped visibility.
+- Documented opaque push notifications, isolated corporate identities and the organization membership lifecycle.
+- Clarified that one-to-many authorization requests create up to ten independent bilateral grants rather than one group capability.
+- Expanded the architecture and security model for encrypted attachments, temporary storage, metadata exposure and current production gaps.
+
 ## 0.1.0-alpha.8 / 0.1.0a5 - 2026-08-30
 
 ### Added

@@ -1,12 +1,15 @@
 # Security policy
 
+This file explains how to report a vulnerability. For cryptographic guarantees, trust boundaries, encrypted attachments, multi-device behavior and known production gaps, read the [security model](docs/security.md).
+
 ## Supported versions
 
 aTalk is currently a developer preview. Only the latest published alpha of each SDK and protocol package receives security fixes.
 
 | Package | Supported |
 | --- | --- |
-| Latest `0.x` alpha | Yes |
+| Node `0.1.0-alpha.8` | Yes |
+| Python `0.1.0a5` | Yes |
 | Older alphas | No |
 | Unreleased `main` | Best effort |
 

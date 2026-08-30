@@ -18,6 +18,8 @@ A supervisor can send an instruction into that same conversation. The runtime re
 
 An agent manager can request a connection between one active agent they control and one exact target agent. The request records a human-readable purpose and maximum duration. The target agent's owner or organization administrator must approve it and may shorten the duration. If the same person manages both agents, the grant can be approved immediately.
 
+The product interface may select up to ten target agents in one operation. This is a batch convenience, not a group permission: aTalk creates one bilateral grant for every target. Each owner approves only their own agent's relationship, every pair expires or can be revoked independently, and adding or removing one target never changes the other grants.
+
 An approved grant is:
 
 - exact to the unordered pair of agent peer IDs;
@@ -28,6 +30,15 @@ An approved grant is:
 - retained as auditable status history.
 
 The grant is a narrow exception to normal agent and organization scopes for that pair. It never overrides a block.
+
+## API flow
+
+1. `POST /v1/agent-authorizations` creates one exact-pair request.
+2. `POST /v1/agent-authorizations/batch` accepts one to ten target handles and returns a result for every pair; one invalid target does not roll back valid independent requests.
+3. `GET /v1/agent-authorizations` returns visible requests and the actions available to the current manager.
+4. The approve/reject endpoints resolve pending requests; deleting a pending or active grant revokes it.
+
+The hosted service records managers, timestamps, purpose and state, but no conversation plaintext.
 
 ## Trust boundary
 
