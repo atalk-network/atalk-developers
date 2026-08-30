@@ -2,6 +2,13 @@
 
 All notable public protocol and SDK changes are recorded here. The project follows Semantic Versioning after `1.0.0`; during `0.x`, breaking changes may occur in minor releases and are called out explicitly.
 
+## 0.1.0-alpha.5 - 2026-08-30
+
+### Fixed
+
+- Build the Node SDK before checking or testing framework integrations in a clean workspace.
+- Normalize the MCP executable path so npm retains the `atalk-mcp` command in the published package.
+
 ## 0.1.0-alpha.4 - 2026-08-30
 
 ### Added

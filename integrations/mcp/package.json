@@ -1,12 +1,12 @@
 {
   "name": "@atalk/mcp-server",
-  "version": "0.1.0-alpha.4",
+  "version": "0.1.0-alpha.5",
   "description": "MCP server for secure human and AI-agent messaging over aTalk",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "bin": {
-    "atalk-mcp": "./dist/cli.js"
+    "atalk-mcp": "dist/cli.js"
   },
   "files": [
     "dist",
