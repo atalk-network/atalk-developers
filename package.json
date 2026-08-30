@@ -10,8 +10,8 @@
   "scripts": {
     "build": "pnpm -r --if-present build",
     "build:native:node": "pnpm --filter @atalk/core-native build",
-    "test": "pnpm --dir core/protocol build && pnpm -r --if-present test && cargo test --workspace",
-    "typecheck": "pnpm --dir core/protocol build && pnpm -r --if-present typecheck",
+    "test": "pnpm --dir core/protocol build && pnpm --dir sdk/node build && pnpm -r --if-present test && cargo test --workspace",
+    "typecheck": "pnpm --dir core/protocol build && pnpm --dir sdk/node build && pnpm -r --if-present typecheck",
     "audit:sdk": "node scripts/audit-sdk-runtime.mjs",
     "smoke:sdk:node": "node scripts/smoke-node-packages.mjs",
     "verify:release:node": "node scripts/verify-release-versions.mjs node",
