@@ -11,13 +11,14 @@ export const publicPeerSchema = z
     status: z.enum(PEER_STATUSES),
     handle: z.string().regex(/^@[a-z0-9][a-z0-9._-]{1,62}$/u),
     displayName: z.string().trim().min(1).max(120),
+    publicDiscoverable: z.boolean().default(false),
+    organizationDiscoverable: z.boolean().default(true),
     signingPublicKey: base64Url,
     encryptionPublicKey: base64Url,
     organizationId: uuid.optional(),
     personalOwnerPeerId: uuid.optional(),
     membershipOrganizationIds: z.array(uuid).optional(),
-  })
-  .strict();
+  });
 
 export const agentOwnershipSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("PERSONAL"), humanPeerId: uuid }).strict(),

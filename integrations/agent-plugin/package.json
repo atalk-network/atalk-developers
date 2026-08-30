@@ -1,6 +1,6 @@
 {
   "name": "@atalk/agent-plugin",
-  "version": "0.1.0-alpha.6",
+  "version": "0.1.0-alpha.7",
   "description": "Portable Agent Plugin for secure aTalk messaging",
   "type": "module",
   "files": [

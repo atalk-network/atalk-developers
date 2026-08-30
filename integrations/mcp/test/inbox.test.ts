@@ -13,6 +13,8 @@ function message(id: string): IncomingMessage {
       status: "ACTIVE",
       handle: "@sender.demo",
       displayName: "Sender",
+      publicDiscoverable: false,
+      organizationDiscoverable: true,
       signingPublicKey: "a".repeat(43),
       encryptionPublicKey: "b".repeat(43),
     },

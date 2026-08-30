@@ -32,6 +32,8 @@ export interface PublicPeer {
   status: PeerStatus;
   handle: string;
   displayName: string;
+  publicDiscoverable: boolean;
+  organizationDiscoverable: boolean;
   signingPublicKey: string;
   encryptionPublicKey: string;
   organizationId?: string;

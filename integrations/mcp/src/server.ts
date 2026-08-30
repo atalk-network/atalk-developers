@@ -34,7 +34,7 @@ export function createAtalkMcpServer(options: AtalkMcpOptions = {}): AtalkMcpRun
       ?? join(process.env.PLUGIN_DATA ?? join(homedir(), ".atalk"), "mcp-agent.json"),
   });
   const inbox = new AgentInbox();
-  const server = new McpServer({ name: "atalk", version: "0.1.0-alpha.6" });
+  const server = new McpServer({ name: "atalk", version: "0.1.0-alpha.7" });
 
   agent.on("message", (message: IncomingMessage) => inbox.push(message));
   agent.on("error", (error) => console.error(`[aTalk] ${error.message}`));

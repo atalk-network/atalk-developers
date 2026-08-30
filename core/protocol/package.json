@@ -1,6 +1,6 @@
 {
   "name": "@atalk/protocol",
-  "version": "0.1.0-alpha.6",
+  "version": "0.1.0-alpha.7",
   "description": "Canonical protocol, wire schemas and cryptography for the aTalk messaging network",
   "type": "module",
   "main": "./dist/index.js",

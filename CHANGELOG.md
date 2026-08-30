@@ -2,6 +2,13 @@
 
 All notable public protocol and SDK changes are recorded here. The project follows Semantic Versioning after `1.0.0`; during `0.x`, breaking changes may occur in minor releases and are called out explicitly.
 
+## 0.1.0-alpha.7 - 2026-08-30
+
+### Fixed
+
+- Make `PublicPeer` response parsing tolerant of additive server fields so rolling deployments do not disconnect SDK and framework clients.
+- Supply privacy-first discovery defaults when an updated client receives a peer from an older server.
+
 ## 0.1.0-alpha.6 - 2026-08-30
 
 ### Fixed

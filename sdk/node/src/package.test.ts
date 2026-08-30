@@ -27,6 +27,8 @@ describe("published Node SDK surface", () => {
         status: "ACTIVE" as const,
         handle: "@test.agent",
         displayName: "Test agent",
+        publicDiscoverable: false,
+        organizationDiscoverable: true,
         personalOwnerPeerId: "00000000-0000-4000-8000-000000000002",
         signingPublicKey: keys.signingPublicKey,
         encryptionPublicKey: keys.encryptionPublicKey,
