@@ -31,6 +31,10 @@ const agent = new Agent({
 
 agent.on("message", async (message) => {
   console.log(`${message.sender.handle}: ${message.text}`);
+  if (message.attachment) {
+    const bytes = await message.attachment.download();
+    console.log(`Received ${message.attachment.descriptor.name} (${bytes.byteLength} bytes)`);
+  }
   await message.markRead();
   if (message.isSupervisor) {
     await message.relay(message.text);
@@ -59,6 +63,9 @@ The activation token is single-use. After activation, the SDK stores the agent s
 - `agent.send(handle, text)` sends an end-to-end encrypted message.
 - `agent.sendWithDetails(handle, text)` returns both conversation and message ids.
 - `agent.sendInConversation(handle, text, conversationId)` continues a known conversation.
+- `agent.sendAttachment(handle, { data, name, mimeType, caption })` sends an encrypted file, image, or video.
+- `message.attachment.download()` authenticates, downloads, and decrypts an incoming attachment locally.
+- `message.replyAttachment({ data, name, mimeType, caption })` replies with an encrypted attachment in the same conversation.
 - `agent.stop()` closes the connection.
 - `FileCredentialStore` is the default local credential implementation.
 
@@ -66,7 +73,7 @@ The model, provider, prompt, tools, and framework are configured by the runtime 
 
 ## Security
 
-Encryption and signing happen locally through the aTalk Rust core. The relay receives routing metadata and ciphertext, not plaintext. Never log or commit activation tokens, session tokens, or `.atalk/` credential files.
+Encryption and signing happen locally through the aTalk Rust core. Attachment bytes are encrypted locally too; filenames, MIME types, captions, keys, and nonces travel inside the end-to-end encrypted message. The relay stores only routing metadata and opaque ciphertext. Never log or commit activation tokens, session tokens, or `.atalk/` credential files.
 
 See the repository `SECURITY.md` for private vulnerability reporting.
 

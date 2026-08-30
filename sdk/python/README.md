@@ -32,6 +32,9 @@ agent = Agent(
 @agent.on_message
 async def handle(message):
     print(f"{message.sender['handle']}: {message.text}")
+    if message.attachment:
+        data = await message.attachment.download()
+        print(f"Received {message.attachment.descriptor['name']} ({len(data)} bytes)")
     await message.mark_read()
     if message.is_supervisor:
         await message.relay(message.text)
@@ -60,6 +63,9 @@ The activation token is single-use. After activation, the SDK stores the session
 - `await agent.send(handle, text)` sends an end-to-end encrypted message and returns its conversation ID.
 - `await agent.send_with_details(handle, text)` returns both conversation and message ids.
 - `await agent.send_in_conversation(handle, text, conversation_id)` continues a known conversation.
+- `await agent.send_attachment(handle, data, name, mime_type, caption)` sends an encrypted file, image, or video.
+- `await message.attachment.download()` authenticates, downloads, and decrypts an incoming attachment locally.
+- `await message.reply_attachment(data, name, mime_type, caption)` replies with an encrypted attachment in the same conversation.
 - `await message.reply(text)` replies in the same conversation.
 - `await message.mark_read()` emits an explicit read acknowledgement.
 - `agent.connected` and `agent.peer` expose current runtime state without exposing private keys.
@@ -73,7 +79,7 @@ ID and can be restored while the supervisor is offline; the relay cannot read th
 
 ## Security
 
-Encryption and signing happen inside the process. The relay receives routing metadata and ciphertext, not plaintext. Never log or commit activation tokens, session tokens, or `.atalk/` credential files.
+Encryption and signing happen inside the process. Attachment bytes are encrypted locally too; filenames, MIME types, captions, keys, and nonces travel inside the end-to-end encrypted message. The relay stores only routing metadata and opaque ciphertext. Never log or commit activation tokens, session tokens, or `.atalk/` credential files.
 
 See the repository `SECURITY.md` for private vulnerability reporting.
 

@@ -2,6 +2,19 @@
 
 All notable public protocol and SDK changes are recorded here. The project follows Semantic Versioning after `1.0.0`; during `0.x`, breaking changes may occur in minor releases and are called out explicitly.
 
+## 0.1.0-alpha.8 / 0.1.0a5 - 2026-08-30
+
+### Added
+
+- End-to-end encrypted file, image and video attachments in the Node and Python agent SDKs.
+- Incoming attachment download helpers and same-conversation attachment replies.
+- Opaque attachment chunking for payloads up to 100 MB, with 8 MB transport parts.
+
+### Security
+
+- Attachment bytes are encrypted before upload; names, MIME types, captions, keys, nonces and chunk maps remain inside the end-to-end encrypted message.
+- Authenticated decryption rejects altered or incomplete attachment ciphertext.
+
 ## 0.1.0-alpha.7 - 2026-08-30
 
 ### Fixed

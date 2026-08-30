@@ -16,7 +16,18 @@ import httpx
 from websockets.asyncio.client import ClientConnection, connect
 from websockets.exceptions import ConnectionClosed
 
-from .protocol import IdentityKeys, decrypt_text, encrypt_text
+from .protocol import (
+    IdentityKeys,
+    attachment_part_descriptors,
+    decode_attachment_message,
+    decrypt_attachment,
+    decrypt_text,
+    encode_attachment_message,
+    encrypt_attachment,
+    encrypt_text,
+    join_encrypted_attachment_parts,
+    split_encrypted_attachment,
+)
 
 _ACTIVITY_PREFIX = "__ATALK_AGENT_ACTIVITY_V1__"
 _FATAL_SESSION_CODES = {"AUTH_REQUIRED", "INVALID_SESSION", "PEER_INACTIVE"}
@@ -74,6 +85,15 @@ class FileCredentialStore:
 
 
 @dataclass
+class Attachment:
+    descriptor: dict[str, Any]
+    _download: Callable[[], Awaitable[bytes]]
+
+    async def download(self) -> bytes:
+        return await self._download()
+
+
+@dataclass
 class Message:
     id: str
     conversation_id: str
@@ -81,12 +101,19 @@ class Message:
     sender: dict[str, Any]
     received_at: datetime
     is_supervisor: bool
+    attachment: Attachment | None
     _reply: Callable[[str], Awaitable[str]]
+    _reply_attachment: Callable[[bytes, str, str, str | None], Awaitable[str]]
     _relay: Callable[[str], Awaitable[str]]
     _mark_read: Callable[[], Awaitable[None]]
 
     async def reply(self, text: str) -> str:
         return await self._reply(text)
+
+    async def reply_attachment(
+        self, data: bytes, name: str, mime_type: str = "application/octet-stream", caption: str | None = None,
+    ) -> str:
+        return await self._reply_attachment(data, name, mime_type, caption)
 
     async def relay(self, text: str) -> str:
         return await self._relay(text)
@@ -199,6 +226,30 @@ class Agent:
         """Send inside a known conversation and return the new message id."""
         return await self._send_envelope(recipient_handle, text, conversation_id)
 
+    async def send_attachment(
+        self, recipient_handle: str, data: bytes, name: str,
+        mime_type: str = "application/octet-stream", caption: str | None = None,
+    ) -> str:
+        return (await self.send_attachment_with_details(recipient_handle, data, name, mime_type, caption)).conversation_id
+
+    async def send_attachment_with_details(
+        self, recipient_handle: str, data: bytes, name: str,
+        mime_type: str = "application/octet-stream", caption: str | None = None,
+    ) -> SentMessage:
+        conversation_id = str(uuid.uuid4())
+        message_id = await self._send_attachment_envelope(
+            recipient_handle, data, name, mime_type, caption, conversation_id,
+        )
+        return SentMessage(conversation_id=conversation_id, message_id=message_id)
+
+    async def send_attachment_in_conversation(
+        self, recipient_handle: str, data: bytes, name: str, conversation_id: str,
+        mime_type: str = "application/octet-stream", caption: str | None = None,
+    ) -> str:
+        return await self._send_attachment_envelope(
+            recipient_handle, data, name, mime_type, caption, conversation_id,
+        )
+
     async def _activate(self) -> Credentials:
         if not self._activation_token:
             raise AgentError(
@@ -307,6 +358,7 @@ class Agent:
             sender_encryption_public_key=sender["encryptionPublicKey"],
             recipient_encryption_secret_key=credentials.keys.encryption_secret_key,
         )
+        attachment_message = decode_attachment_message(text)
         is_supervisor = any(supervisor["id"] == sender["id"] for supervisor in self._supervisors)
         if not is_supervisor:
             self._counterparties[envelope["conversation_id"]] = sender
@@ -317,6 +369,11 @@ class Agent:
         if self._handler:
             async def reply(reply_text: str) -> str:
                 return await self._send_envelope(sender["handle"], reply_text, envelope["conversation_id"])
+
+            async def reply_attachment(data: bytes, name: str, mime_type: str, caption: str | None) -> str:
+                return await self._send_attachment_envelope(
+                    sender["handle"], data, name, mime_type, caption, envelope["conversation_id"],
+                )
 
             async def relay(relay_text: str) -> str:
                 if not is_supervisor:
@@ -332,11 +389,16 @@ class Agent:
             result = self._handler(Message(
                 id=envelope["message_id"],
                 conversation_id=envelope["conversation_id"],
-                text=text,
+                text=str(attachment_message.get("caption", "")) if attachment_message else text,
                 sender=sender,
                 received_at=_parse_timestamp(envelope["timestamp"]),
                 is_supervisor=is_supervisor,
+                attachment=Attachment(
+                    descriptor=attachment_message["attachment"],
+                    _download=lambda: self._download_attachment(attachment_message["attachment"]),
+                ) if attachment_message else None,
                 _reply=reply,
+                _reply_attachment=reply_attachment,
                 _relay=relay,
                 _mark_read=mark_read,
             ))
@@ -366,6 +428,69 @@ class Agent:
                 "OUTGOING", recipient, text, conversation_id, envelope["message_id"], envelope["timestamp"],
             )
         return str(envelope["message_id"])
+
+    async def _send_attachment_envelope(
+        self,
+        recipient_handle: str,
+        data: bytes,
+        name: str,
+        mime_type: str,
+        caption: str | None,
+        conversation_id: str,
+    ) -> str:
+        credentials = self._require_credentials()
+        result = await self._request("POST", "/v1/messages/authorize", {"recipientHandle": recipient_handle})
+        recipient = result["recipient"]
+        descriptor, ciphertext = encrypt_attachment(
+            attachment_id=str(uuid.uuid4()), data=data, name=name, mime_type=mime_type,
+        )
+        descriptor, parts = split_encrypted_attachment(descriptor, ciphertext, lambda: str(uuid.uuid4()))
+        for part_id, part in parts:
+            await self._upload_attachment(recipient["id"], part_id, part)
+        plaintext = encode_attachment_message(descriptor, caption)
+        envelope = encrypt_text(
+            message_id=str(uuid.uuid4()),
+            conversation_id=conversation_id,
+            sender_peer_id=credentials.peer["id"],
+            recipient_peer_id=recipient["id"],
+            timestamp=_utc_now(),
+            plaintext=plaintext,
+            sender_signing_secret_key=credentials.keys.signing_secret_key,
+            sender_encryption_secret_key=credentials.keys.encryption_secret_key,
+            recipient_encryption_public_key=recipient["encryptionPublicKey"],
+        )
+        await self._send_frame({"kind": "DELIVER", "envelope": envelope})
+        is_supervisor = any(supervisor["id"] == recipient["id"] for supervisor in self._supervisors)
+        if not is_supervisor:
+            self._counterparties[conversation_id] = recipient
+            await self._mirror_activity(
+                "OUTGOING", recipient, plaintext, conversation_id, envelope["message_id"], envelope["timestamp"],
+            )
+        return str(envelope["message_id"])
+
+    async def _upload_attachment(
+        self, recipient_peer_id: str, attachment_id: str, ciphertext: bytes,
+    ) -> None:
+        headers = {
+            "authorization": f"Bearer {self._require_credentials().session_token}",
+            "content-type": "application/octet-stream",
+        }
+        path = f"/v1/attachments/{attachment_id}?recipientPeerId={recipient_peer_id}"
+        async with httpx.AsyncClient(base_url=self._base_url, timeout=30) as client:
+            response = await client.post(path, headers=headers, content=ciphertext)
+        if response.is_error:
+            self._raise_http_error(response)
+
+    async def _download_attachment(self, descriptor: dict[str, Any]) -> bytes:
+        headers = {"authorization": f"Bearer {self._require_credentials().session_token}"}
+        parts = []
+        async with httpx.AsyncClient(base_url=self._base_url, timeout=30) as client:
+            for part in attachment_part_descriptors(descriptor):
+                response = await client.get(f"/v1/attachments/{part['id']}", headers=headers)
+                if response.is_error:
+                    self._raise_http_error(response)
+                parts.append(response.content)
+        return decrypt_attachment(join_encrypted_attachment_parts(parts, descriptor), descriptor)
 
     async def _mirror_activity(
         self,
@@ -429,9 +554,18 @@ class Agent:
             response = await client.request(method, path, headers=headers, json=payload)
         body = response.json()
         if response.is_error:
-            error = body.get("error", {})
-            raise AgentError(str(error.get("code", response.status_code)), str(error.get("message", "request failed")))
+            self._raise_http_error(response, body)
         return body
+
+    @staticmethod
+    def _raise_http_error(response: httpx.Response, body: dict[str, Any] | None = None) -> None:
+        if body is None:
+            try:
+                body = response.json()
+            except ValueError:
+                body = {}
+        error = body.get("error", {})
+        raise AgentError(str(error.get("code", response.status_code)), str(error.get("message", "request failed")))
 
     def _require_credentials(self) -> Credentials:
         if self._credentials is None:

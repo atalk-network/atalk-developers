@@ -14,6 +14,7 @@ The package exports:
 - TypeScript types for peers, policies and messages;
 - canonical JSON encoding and signature verification;
 - TweetNaCl-based encryption helpers;
+- authenticated attachment encryption, metadata envelopes and opaque chunking up to 100 MB;
 - permission evaluation shared with the Rust golden vectors.
 
 Applications normally install `@atalk/sdk` instead. Use this lower-level package when building another SDK, transport adapter or protocol conformance test.

@@ -4,9 +4,9 @@
 
 The first public line is intentionally marked alpha:
 
-- npm packages: `0.1.0-alpha.7`, distributed under the `next` tag;
-- Python packages: `0.1.0a4`, installed with `pip --pre`;
-- Git release tags: `node-v0.1.0-alpha.7` and `python-v0.1.0a4`.
+- npm packages: `0.1.0-alpha.8`, distributed under the `next` tag;
+- Python packages: `0.1.0a5`, installed with `pip --pre`;
+- Git release tags: `node-v0.1.0-alpha.8` and `python-v0.1.0a5`.
 
 During `0.x`, minor releases may contain breaking API or protocol changes. Patch releases must remain compatible with their minor line unless they fix a security defect that cannot be addressed safely otherwise.
 
@@ -21,7 +21,7 @@ The Python package uses the PEP 440 spelling of the same release. For example:
 | First alpha | `0.1.0-alpha.1` | `0.1.0a1` |
 | Ownership alpha | `0.1.0-alpha.2` | `0.1.0a2` |
 | Supervision alpha | `0.1.0-alpha.3` | `0.1.0a3` |
-| Framework integration alpha | `0.1.0-alpha.7` | `0.1.0a4` |
+| Encrypted attachments alpha | `0.1.0-alpha.8` | `0.1.0a5` |
 | First beta | `0.1.0-beta.1` | `0.1.0b1` |
 | Stable | `0.1.0` | `0.1.0` |
 

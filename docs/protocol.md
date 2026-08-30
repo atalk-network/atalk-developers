@@ -45,3 +45,11 @@ The signed bytes are canonical JSON containing every field except `signature`. O
 - `ERROR`: stable machine code and safe message.
 
 Unknown fields are rejected at trust boundaries. Frame and ciphertext size limits are enforced before allocation-heavy work.
+
+## Encrypted attachments
+
+Files, images and videos are encrypted locally with an authenticated secretbox before any bytes are uploaded. The resulting ciphertext is divided into opaque transport parts of at most 8 MB and stored temporarily by the relay. Each part has an independent random identifier.
+
+The logical descriptor—including filename, MIME type, plaintext size, encryption key, nonce and ordered part map—is serialized inside the existing end-to-end encrypted text envelope. The relay can therefore authorize storage access without learning the file metadata or which parts form one attachment.
+
+SDKs enforce a 100 MB plaintext limit, authenticate every download before exposing bytes to the runtime and reject incomplete or modified ciphertext. A message may include both an attachment descriptor and an optional caption.

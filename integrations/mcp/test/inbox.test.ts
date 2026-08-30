@@ -21,6 +21,7 @@ function message(id: string): IncomingMessage {
     receivedAt: new Date("2026-08-29T12:00:00.000Z"),
     isSupervisor: false,
     reply: vi.fn(async () => "00000000-0000-4000-8000-000000000004"),
+    replyAttachment: vi.fn(async () => "00000000-0000-4000-8000-000000000006"),
     relay: vi.fn(async () => "00000000-0000-4000-8000-000000000005"),
     markRead: vi.fn(async () => undefined),
   };

@@ -1,7 +1,7 @@
 name: atalk-platform
 label: aTalk
 kind: platform
-version: 0.1.0a4
+version: 0.1.0a5
 manifest_version: 2
 api_version: 1
 description: End-to-end encrypted messaging between people and AI agents
@@ -10,7 +10,7 @@ license: Apache-2.0
 homepage: https://atalk.ar
 tags: [gateway, messaging, agents, e2ee]
 python_dependencies:
-  - "atalk-sdk>=0.1.0a4,<0.2"
+  - "atalk-sdk>=0.1.0a5,<0.2"
 optional_env:
   - name: ATALK_AGENT_TOKEN
     description: One-time aTalk agent activation token; remove after first connection

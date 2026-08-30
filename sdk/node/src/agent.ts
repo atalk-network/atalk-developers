@@ -1,7 +1,15 @@
 import { randomUUID } from "node:crypto";
 import {
+  decodeAttachmentMessage,
+  decryptAttachment,
+  attachmentPartDescriptors,
   encodeAgentActivity,
+  encodeAttachmentMessage,
+  encryptAttachment,
+  joinEncryptedAttachmentParts,
   serverFrameSchema,
+  splitEncryptedAttachment,
+  type AttachmentDescriptor,
   type EncryptedEnvelope,
   type PublicPeer,
   type ServerFrame,
@@ -23,12 +31,26 @@ export interface IncomingMessage {
   id: string;
   conversationId: string;
   text: string;
+  attachment?: IncomingAttachment;
   sender: PublicPeer;
   receivedAt: Date;
   isSupervisor: boolean;
   reply(text: string): Promise<string>;
+  replyAttachment(input: AgentAttachmentInput): Promise<string>;
   relay(text: string): Promise<string>;
   markRead(): Promise<void>;
+}
+
+export interface AgentAttachmentInput {
+  data: Uint8Array;
+  name: string;
+  mimeType?: string;
+  caption?: string;
+}
+
+export interface IncomingAttachment {
+  descriptor: AttachmentDescriptor;
+  download(): Promise<Uint8Array>;
 }
 
 export interface SentMessage {
@@ -108,6 +130,24 @@ export class Agent {
   /** Send inside a known conversation and return the new message id. */
   async sendInConversation(recipientHandle: string, text: string, conversationId: string): Promise<string> {
     return this.sendEnvelope(recipientHandle, text, conversationId);
+  }
+
+  async sendAttachment(recipientHandle: string, input: AgentAttachmentInput): Promise<string> {
+    return (await this.sendAttachmentWithDetails(recipientHandle, input)).conversationId;
+  }
+
+  async sendAttachmentWithDetails(recipientHandle: string, input: AgentAttachmentInput): Promise<SentMessage> {
+    const conversationId = randomUUID();
+    const messageId = await this.sendAttachmentEnvelope(recipientHandle, input, conversationId);
+    return { conversationId, messageId };
+  }
+
+  async sendAttachmentInConversation(
+    recipientHandle: string,
+    input: AgentAttachmentInput,
+    conversationId: string,
+  ): Promise<string> {
+    return this.sendAttachmentEnvelope(recipientHandle, input, conversationId);
   }
 
   private async activate(): Promise<AgentCredentials> {
@@ -215,6 +255,7 @@ export class Agent {
       senderEncryptionPublicKey: sender.encryptionPublicKey,
       recipientEncryptionSecretKey: credentials.keys.encryptionSecretKey,
     });
+    const attachmentMessage = decodeAttachmentMessage(text);
     const isSupervisor = this.supervisors.some((supervisor) => supervisor.id === sender.id);
     if (!isSupervisor) {
       this.counterparties.set(frame.envelope.conversation_id, sender);
@@ -225,11 +266,16 @@ export class Agent {
       await this.messageHandler({
         id: frame.envelope.message_id,
         conversationId: frame.envelope.conversation_id,
-        text,
+        text: attachmentMessage?.caption ?? (attachmentMessage ? "" : text),
+        ...(attachmentMessage ? { attachment: {
+          descriptor: attachmentMessage.attachment,
+          download: () => this.downloadAttachment(attachmentMessage.attachment),
+        } } : {}),
         sender,
         receivedAt: new Date(frame.envelope.timestamp),
         isSupervisor,
         reply: (replyText) => this.sendEnvelope(sender.handle, replyText, frame.envelope.conversation_id),
+        replyAttachment: (input) => this.sendAttachmentEnvelope(sender.handle, input, frame.envelope.conversation_id),
         relay: async (relayText) => {
           if (!isSupervisor) throw new Error("Only supervisor messages can be relayed");
           const counterparty = this.counterparties.get(frame.envelope.conversation_id);
@@ -266,6 +312,82 @@ export class Agent {
       await this.mirrorActivity("OUTGOING", recipient, text, conversationId, envelope.message_id, envelope.timestamp);
     }
     return envelope.message_id;
+  }
+
+  private async sendAttachmentEnvelope(
+    recipientHandle: string,
+    input: AgentAttachmentInput,
+    conversationId: string,
+  ): Promise<string> {
+    const credentials = this.requireCredentials();
+    if (!this.socket || this.socket.readyState !== WebSocket.OPEN) throw new Error("Agent is not connected");
+    const { recipient } = await this.request<{ recipient: PublicPeer }>("/v1/messages/authorize", {
+      method: "POST",
+      body: JSON.stringify({ recipientHandle }),
+    });
+    const encrypted = splitEncryptedAttachment(encryptAttachment({
+      id: randomUUID(),
+      bytes: input.data,
+      name: input.name,
+      mimeType: input.mimeType ?? "application/octet-stream",
+    }), randomUUID);
+    for (const part of encrypted.parts) {
+      await this.uploadAttachment(recipient.id, part.id, part.ciphertext);
+    }
+    const caption = input.caption?.trim();
+    const plaintext = encodeAttachmentMessage({
+      attachment: encrypted.descriptor,
+      ...(caption ? { caption } : {}),
+    });
+    const envelope: EncryptedEnvelope = encryptTextNative({
+      messageId: randomUUID(),
+      conversationId,
+      senderPeerId: credentials.peer.id,
+      recipientPeerId: recipient.id,
+      timestamp: new Date().toISOString(),
+      plaintext,
+      senderSigningSecretKey: credentials.keys.signingSecretKey,
+      senderEncryptionSecretKey: credentials.keys.encryptionSecretKey,
+      recipientEncryptionPublicKey: recipient.encryptionPublicKey,
+    });
+    this.sendFrame({ kind: "DELIVER", envelope });
+    const isSupervisor = this.supervisors.some((supervisor) => supervisor.id === recipient.id);
+    if (!isSupervisor) {
+      this.counterparties.set(conversationId, recipient);
+      await this.mirrorActivity("OUTGOING", recipient, plaintext, conversationId, envelope.message_id, envelope.timestamp);
+    }
+    return envelope.message_id;
+  }
+
+  private async uploadAttachment(
+    recipientPeerId: string,
+    attachmentId: string,
+    ciphertext: Uint8Array,
+  ): Promise<void> {
+    const response = await fetch(
+      `${this.baseUrl}/v1/attachments/${attachmentId}?recipientPeerId=${encodeURIComponent(recipientPeerId)}`,
+      {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${this.requireCredentials().sessionToken}`,
+          "content-type": "application/octet-stream",
+        },
+        body: exactArrayBuffer(ciphertext),
+      },
+    );
+    if (!response.ok) throw await responseError(response);
+  }
+
+  private async downloadAttachment(descriptor: AttachmentDescriptor): Promise<Uint8Array> {
+    const parts: Uint8Array[] = [];
+    for (const part of attachmentPartDescriptors(descriptor)) {
+      const response = await fetch(`${this.baseUrl}/v1/attachments/${part.id}`, {
+        headers: { authorization: `Bearer ${this.requireCredentials().sessionToken}` },
+      });
+      if (!response.ok) throw await responseError(response);
+      parts.push(new Uint8Array(await response.arrayBuffer()));
+    }
+    return decryptAttachment(joinEncryptedAttachmentParts(parts, descriptor), descriptor);
   }
 
   private async mirrorActivity(
@@ -337,6 +459,20 @@ export class Agent {
     if (this.errorHandler) this.errorHandler(normalized);
     else queueMicrotask(() => { throw normalized; });
   }
+}
+
+function exactArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+  return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+}
+
+async function responseError(response: Response): Promise<Error> {
+  try {
+    const body = await response.json() as { error?: { code?: string; message?: string } };
+    if (body.error) return new Error(`${body.error.code ?? response.status}: ${body.error.message ?? "request failed"}`);
+  } catch {
+    // Keep the HTTP fallback for non-JSON proxy responses.
+  }
+  return new Error(`HTTP ${response.status}`);
 }
 
 function reconnectDelay(attempt: number): number {

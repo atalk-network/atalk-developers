@@ -1,7 +1,19 @@
 import json
 from pathlib import Path
 
-from atalk.protocol import b64url_decode, decrypt_text, encrypt_text
+import pytest
+
+from atalk.protocol import (
+    b64url_decode,
+    decode_attachment_message,
+    decrypt_attachment,
+    decrypt_text,
+    encode_attachment_message,
+    encrypt_attachment,
+    encrypt_text,
+    join_encrypted_attachment_parts,
+    split_encrypted_attachment,
+)
 
 
 def test_decrypts_typescript_golden_vector():
@@ -31,3 +43,35 @@ def test_python_encryption_matches_typescript_golden_vector():
         recipient_encryption_public_key=vector["recipient_encryption_public_key"],
         nonce=b64url_decode(envelope["nonce"]),
     ) == envelope
+
+
+def test_attachment_round_trip_and_tamper_detection():
+    plaintext = b"invoice,total\nINV-42,1250.00\n"
+    descriptor, ciphertext = encrypt_attachment(
+        attachment_id="8952bff1-cec4-4b6a-8077-73417fb75301",
+        data=plaintext,
+        name="invoice.csv",
+        mime_type="text/csv",
+    )
+    encoded = encode_attachment_message(descriptor, "Please process this invoice")
+    decoded = decode_attachment_message(encoded)
+
+    assert decoded == {"attachment": descriptor, "caption": "Please process this invoice"}
+    assert decrypt_attachment(ciphertext, descriptor) == plaintext
+    with pytest.raises(ValueError):
+        decrypt_attachment(ciphertext[:-1] + bytes([ciphertext[-1] ^ 1]), descriptor)
+
+
+def test_large_attachment_is_split_and_reassembled():
+    plaintext = b"x" * (9 * 1024 * 1024)
+    descriptor, ciphertext = encrypt_attachment(
+        attachment_id="8952bff1-cec4-4b6a-8077-73417fb75302",
+        data=plaintext,
+        name="video.mp4",
+        mime_type="video/mp4",
+    )
+    identifiers = iter(["8952bff1-cec4-4b6a-8077-73417fb75303"])
+    descriptor, parts = split_encrypted_attachment(descriptor, ciphertext, lambda: next(identifiers))
+    assert [len(part) for _, part in parts] == [8 * 1024 * 1024, 1 * 1024 * 1024 + 16]
+    joined = join_encrypted_attachment_parts([part for _, part in parts], descriptor)
+    assert decrypt_attachment(joined, descriptor) == plaintext
