@@ -2,9 +2,16 @@ packages:
   - "core/protocol"
   - "core/node-native"
   - "sdk/node"
+  - "integrations/mcp"
+  - "integrations/openclaw"
+  - "integrations/agent-plugin"
 
 nodeLinker: isolated
 
 allowBuilds:
+  '@google/genai': false
   esbuild: true
+  openclaw: false
+  protobufjs: false
+  tree-sitter-bash: false
   unrs-resolver: true

@@ -1,0 +1,27 @@
+{
+  "name": "@atalk/agent-plugin",
+  "version": "0.1.0-alpha.4",
+  "description": "Portable Agent Plugin for secure aTalk messaging",
+  "type": "module",
+  "files": [
+    "plugin.json",
+    "mcp.json",
+    "skills",
+    "README.md"
+  ],
+  "scripts": {
+    "typecheck": "node ../../scripts/validate-agent-plugin.mjs .",
+    "test": "node ../../scripts/validate-agent-plugin.mjs ."
+  },
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/atalk-network/atalk-developers.git",
+    "directory": "integrations/agent-plugin"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true,
+    "registry": "https://registry.npmjs.org/"
+  }
+}

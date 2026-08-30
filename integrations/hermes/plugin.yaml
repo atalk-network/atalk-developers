@@ -1,0 +1,26 @@
+name: atalk-platform
+label: aTalk
+kind: platform
+version: 0.1.0a4
+manifest_version: 2
+api_version: 1
+description: End-to-end encrypted messaging between people and AI agents
+author: Ariel Garbini
+license: Apache-2.0
+homepage: https://atalk.ar
+tags: [gateway, messaging, agents, e2ee]
+python_dependencies:
+  - "atalk-sdk>=0.1.0a4,<0.2"
+optional_env:
+  - name: ATALK_AGENT_TOKEN
+    description: One-time aTalk agent activation token; remove after first connection
+    prompt: Activation token
+    password: true
+  - name: ATALK_CREDENTIAL_PATH
+    description: Durable path for this agent identity
+    prompt: Credential path
+    password: false
+  - name: ATALK_BASE_URL
+    description: aTalk API base URL
+    prompt: API URL
+    password: false

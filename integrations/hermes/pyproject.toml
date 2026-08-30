@@ -1,0 +1,39 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "atalk-hermes"
+version = "0.1.0a4"
+description = "Native aTalk messaging platform plugin for Hermes Agent"
+readme = "README.md"
+license = "Apache-2.0"
+authors = [{ name = "Ariel Garbini" }]
+requires-python = ">=3.11"
+keywords = ["atalk", "hermes-agent", "ai-agents", "messaging", "e2ee"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "License :: OSI Approved :: Apache Software License",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Communications :: Chat"
+]
+dependencies = ["atalk-sdk>=0.1.0a4,<0.2"]
+
+[project.entry-points."hermes_agent.plugins"]
+atalk-platform = "atalk_hermes"
+
+[project.urls]
+Homepage = "https://atalk.ar"
+Repository = "https://github.com/atalk-network/atalk-developers.git"
+Issues = "https://github.com/atalk-network/atalk-developers/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/atalk_hermes"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

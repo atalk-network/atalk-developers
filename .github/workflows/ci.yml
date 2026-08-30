@@ -44,6 +44,8 @@ jobs:
           python -m pip install --upgrade build pip-audit twine
           python -m pip_audit sdk/python
           python -m pip install -e 'sdk/python[test]'
-          python -m pytest sdk/python/tests
+          python -m pip install --no-deps -e integrations/hermes
+          python -m pytest sdk/python/tests integrations/hermes/tests
           python -m build sdk/python
-          python -m twine check sdk/python/dist/*
+          python -m build integrations/hermes
+          python -m twine check sdk/python/dist/* integrations/hermes/dist/*

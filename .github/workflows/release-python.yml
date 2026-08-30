@@ -42,9 +42,11 @@ jobs:
           python -m pip install --upgrade build pip-audit twine
           python -m pip_audit sdk/python
           python -m pip install -e 'sdk/python[test]'
-          python -m pytest sdk/python/tests
+          python -m pip install --no-deps -e integrations/hermes
+          python -m pytest sdk/python/tests integrations/hermes/tests
           python -m build sdk/python
-          python -m twine check sdk/python/dist/*
+          python -m build integrations/hermes
+          python -m twine check sdk/python/dist/* integrations/hermes/dist/*
       - name: Verify built Python SDK public surface
         run: |
           python -m venv "$RUNNER_TEMP/atalk-wheel-smoke"
@@ -54,14 +56,24 @@ jobs:
           from atalk import Agent, Message
 
           assert "supervision" in inspect.signature(Agent).parameters
+          assert inspect.signature(Agent).parameters["token"].default is None
           assert "is_supervisor" in Message.__dataclass_fields__
           assert hasattr(Message, "relay")
-          print("Verified packaged Python supervision API")
+          assert hasattr(Message, "mark_read")
+          assert hasattr(Agent, "send_with_details")
+          assert hasattr(Agent, "send_in_conversation")
+          print("Verified packaged Python integration API")
           PY
       - uses: actions/upload-artifact@v7
         with:
-          name: python-package-distributions
+          name: python-sdk-distributions
           path: sdk/python/dist/
+          if-no-files-found: error
+          retention-days: 3
+      - uses: actions/upload-artifact@v7
+        with:
+          name: hermes-plugin-distributions
+          path: integrations/hermes/dist/
           if-no-files-found: error
           retention-days: 3
 
@@ -76,7 +88,25 @@ jobs:
     steps:
       - uses: actions/download-artifact@v8
         with:
-          name: python-package-distributions
+          name: python-sdk-distributions
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
+          attestations: true
+
+  publish-hermes:
+    needs: [build, publish]
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/atalk-hermes
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: hermes-plugin-distributions
           path: dist/
       - uses: pypa/gh-action-pypi-publish@release/v1
         with:

@@ -43,9 +43,14 @@ class CredentialStore(Protocol):
 
 
 class FileCredentialStore:
-    def __init__(self, activation_token: str, path: str | None = None):
-        suffix = hashlib.sha256(activation_token.encode()).hexdigest()[:16]
-        self.path = Path(path or f".atalk/agent-{suffix}.json").resolve()
+    def __init__(self, activation_token: str | None = None, path: str | None = None):
+        if path:
+            self.path = Path(path).resolve()
+        elif activation_token:
+            suffix = hashlib.sha256(activation_token.encode()).hexdigest()[:16]
+            self.path = Path(f".atalk/agent-{suffix}.json").resolve()
+        else:
+            raise ValueError("An activation token or an explicit credential path is required")
 
     async def load(self) -> Credentials | None:
         try:
@@ -76,14 +81,24 @@ class Message:
     sender: dict[str, Any]
     received_at: datetime
     is_supervisor: bool
-    _reply: Callable[[str], Awaitable[None]]
-    _relay: Callable[[str], Awaitable[None]]
+    _reply: Callable[[str], Awaitable[str]]
+    _relay: Callable[[str], Awaitable[str]]
+    _mark_read: Callable[[], Awaitable[None]]
 
-    async def reply(self, text: str) -> None:
-        await self._reply(text)
+    async def reply(self, text: str) -> str:
+        return await self._reply(text)
 
-    async def relay(self, text: str) -> None:
-        await self._relay(text)
+    async def relay(self, text: str) -> str:
+        return await self._relay(text)
+
+    async def mark_read(self) -> None:
+        await self._mark_read()
+
+
+@dataclass(frozen=True)
+class SentMessage:
+    conversation_id: str
+    message_id: str
 
 
 MessageHandler = Callable[[Message], Awaitable[None] | None]
@@ -94,7 +109,7 @@ class Agent:
     def __init__(
         self,
         *,
-        token: str,
+        token: str | None = None,
         base_url: str = "http://127.0.0.1:4001",
         credential_store: CredentialStore | None = None,
         credential_path: str | None = None,
@@ -121,6 +136,10 @@ class Agent:
     @property
     def connected(self) -> bool:
         return self._socket is not None and self._ready.is_set()
+
+    @property
+    def peer(self) -> dict[str, Any] | None:
+        return self._credentials.peer if self._credentials else None
 
     def on_message(self, handler: MessageHandler) -> MessageHandler:
         self._handler = handler
@@ -169,11 +188,23 @@ class Agent:
         asyncio.run(main())
 
     async def send(self, recipient_handle: str, text: str) -> str:
+        return (await self.send_with_details(recipient_handle, text)).conversation_id
+
+    async def send_with_details(self, recipient_handle: str, text: str) -> SentMessage:
         conversation_id = str(uuid.uuid4())
-        await self._send_envelope(recipient_handle, text, conversation_id)
-        return conversation_id
+        message_id = await self._send_envelope(recipient_handle, text, conversation_id)
+        return SentMessage(conversation_id=conversation_id, message_id=message_id)
+
+    async def send_in_conversation(self, recipient_handle: str, text: str, conversation_id: str) -> str:
+        """Send inside a known conversation and return the new message id."""
+        return await self._send_envelope(recipient_handle, text, conversation_id)
 
     async def _activate(self) -> Credentials:
+        if not self._activation_token:
+            raise AgentError(
+                "ACTIVATION_REQUIRED",
+                "Provide a one-time token because no persisted credentials were found",
+            )
         keys = IdentityKeys.generate()
         result = await self._request(
             "POST",
@@ -284,16 +315,19 @@ class Agent:
             )
         await self._send_frame({"kind": "ACK", "messageId": envelope["message_id"], "state": "DELIVERED"})
         if self._handler:
-            async def reply(reply_text: str) -> None:
-                await self._send_envelope(sender["handle"], reply_text, envelope["conversation_id"])
+            async def reply(reply_text: str) -> str:
+                return await self._send_envelope(sender["handle"], reply_text, envelope["conversation_id"])
 
-            async def relay(relay_text: str) -> None:
+            async def relay(relay_text: str) -> str:
                 if not is_supervisor:
                     raise RuntimeError("Only supervisor messages can be relayed")
                 counterparty = self._counterparties.get(envelope["conversation_id"])
                 if not counterparty:
                     raise RuntimeError("No active counterparty exists for this supervised conversation")
-                await self._send_envelope(counterparty["handle"], relay_text, envelope["conversation_id"])
+                return await self._send_envelope(counterparty["handle"], relay_text, envelope["conversation_id"])
+
+            async def mark_read() -> None:
+                await self._send_frame({"kind": "ACK", "messageId": envelope["message_id"], "state": "READ"})
 
             result = self._handler(Message(
                 id=envelope["message_id"],
@@ -304,6 +338,7 @@ class Agent:
                 is_supervisor=is_supervisor,
                 _reply=reply,
                 _relay=relay,
+                _mark_read=mark_read,
             ))
             if inspect.isawaitable(result):
                 await result

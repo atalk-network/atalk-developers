@@ -11,7 +11,8 @@ import { FileCredentialStore, type AgentCredentials, type CredentialStore } from
 import { decryptTextNative, encryptTextNative, generateIdentityKeysNative } from "./native-core.js";
 
 export interface AgentOptions {
-  token: string;
+  /** One-time activation token. Optional after credentials have been persisted. */
+  token?: string;
   baseUrl?: string;
   credentialStore?: CredentialStore;
   credentialPath?: string;
@@ -25,8 +26,14 @@ export interface IncomingMessage {
   sender: PublicPeer;
   receivedAt: Date;
   isSupervisor: boolean;
-  reply(text: string): Promise<void>;
-  relay(text: string): Promise<void>;
+  reply(text: string): Promise<string>;
+  relay(text: string): Promise<string>;
+  markRead(): Promise<void>;
+}
+
+export interface SentMessage {
+  conversationId: string;
+  messageId: string;
 }
 
 type MessageHandler = (message: IncomingMessage) => void | Promise<void>;
@@ -34,11 +41,13 @@ type ErrorHandler = (error: Error) => void;
 
 export class Agent {
   private readonly baseUrl: string;
-  private readonly activationToken: string;
+  private readonly activationToken: string | undefined;
   private readonly credentialStore: CredentialStore;
   private readonly supervisionEnabled: boolean;
   private credentials?: AgentCredentials;
   private socket?: WebSocket;
+  private ready = false;
+  private reconnectAttempt = 0;
   private stopped = false;
   private messageHandler?: MessageHandler;
   private errorHandler?: ErrorHandler;
@@ -50,6 +59,14 @@ export class Agent {
     this.baseUrl = (options.baseUrl ?? "http://127.0.0.1:4001").replace(/\/$/u, "");
     this.credentialStore = options.credentialStore ?? new FileCredentialStore(options.token, options.credentialPath);
     this.supervisionEnabled = options.supervision ?? true;
+  }
+
+  get connected(): boolean {
+    return this.ready && this.socket?.readyState === WebSocket.OPEN;
+  }
+
+  get peer(): PublicPeer | undefined {
+    return this.credentials?.peer;
   }
 
   on(event: "message", handler: MessageHandler): this;
@@ -72,16 +89,31 @@ export class Agent {
 
   async stop(): Promise<void> {
     this.stopped = true;
+    this.ready = false;
+    this.reconnectAttempt = 0;
     this.socket?.close(1000, "Agent stopped");
   }
 
   async send(recipientHandle: string, text: string): Promise<string> {
+    return (await this.sendWithDetails(recipientHandle, text)).conversationId;
+  }
+
+  /** Start a conversation and return both transport identifiers. */
+  async sendWithDetails(recipientHandle: string, text: string): Promise<SentMessage> {
     const conversationId = randomUUID();
-    await this.sendEnvelope(recipientHandle, text, conversationId);
-    return conversationId;
+    const messageId = await this.sendEnvelope(recipientHandle, text, conversationId);
+    return { conversationId, messageId };
+  }
+
+  /** Send inside a known conversation and return the new message id. */
+  async sendInConversation(recipientHandle: string, text: string, conversationId: string): Promise<string> {
+    return this.sendEnvelope(recipientHandle, text, conversationId);
   }
 
   private async activate(): Promise<AgentCredentials> {
+    if (!this.activationToken) {
+      throw new Error("ACTIVATION_REQUIRED: Provide a one-time token because no persisted credentials were found");
+    }
     const keys = generateIdentityKeysNative();
     const response = await this.request<{ token: string; peer: PublicPeer }>("/v1/agents/activate", {
       method: "POST",
@@ -99,6 +131,7 @@ export class Agent {
   private async connect(): Promise<void> {
     const credentials = this.requireCredentials();
     const websocketUrl = `${this.baseUrl.replace(/^http/u, "ws")}/v1/ws`;
+    this.ready = false;
     await new Promise<void>((resolve, reject) => {
       const socket = new WebSocket(websocketUrl);
       this.socket = socket;
@@ -116,6 +149,8 @@ export class Agent {
         void this.handleFrame(frame).then(() => {
           if (frame.kind === "READY" && !ready && this.socket === socket) {
             ready = true;
+            this.ready = true;
+            this.reconnectAttempt = 0;
             clearTimeout(timeout);
             resolve();
           }
@@ -136,8 +171,11 @@ export class Agent {
       });
       socket.on("close", (code) => {
         clearTimeout(timeout);
+        if (this.socket === socket) this.ready = false;
         if (!ready) {
-          reject(new Error(code === 4001 || code === 1008 ? "INVALID_SESSION: Agent credentials were revoked" : "aTalk connection closed before authentication"));
+          const error = new Error(code === 4001 || code === 1008 ? "INVALID_SESSION: Agent credentials were revoked" : "aTalk connection closed before authentication");
+          if (code === 4001 || code === 1008) this.stopped = true;
+          reject(error);
           return;
         }
         if (code === 4001 || code === 1008) {
@@ -145,9 +183,21 @@ export class Agent {
           this.emitError(new Error("INVALID_SESSION: Agent credentials were revoked"));
           return;
         }
-        if (!this.stopped && ready) setTimeout(() => void this.connect().catch((error) => this.emitError(error)), 1_000);
+        if (!this.stopped && ready) this.scheduleReconnect();
       });
     });
+  }
+
+  private scheduleReconnect(): void {
+    if (this.stopped) return;
+    const delay = reconnectDelay(this.reconnectAttempt++);
+    setTimeout(() => {
+      if (this.stopped) return;
+      void this.connect().catch((error: unknown) => {
+        this.emitError(error);
+        if (!this.stopped) this.scheduleReconnect();
+      });
+    }, delay);
   }
 
   private async handleFrame(frame: ServerFrame): Promise<void> {
@@ -179,15 +229,14 @@ export class Agent {
         sender,
         receivedAt: new Date(frame.envelope.timestamp),
         isSupervisor,
-        reply: async (replyText) => {
-          await this.sendEnvelope(sender.handle, replyText, frame.envelope.conversation_id);
-        },
+        reply: (replyText) => this.sendEnvelope(sender.handle, replyText, frame.envelope.conversation_id),
         relay: async (relayText) => {
           if (!isSupervisor) throw new Error("Only supervisor messages can be relayed");
           const counterparty = this.counterparties.get(frame.envelope.conversation_id);
           if (!counterparty) throw new Error("No active counterparty exists for this supervised conversation");
-          await this.sendEnvelope(counterparty.handle, relayText, frame.envelope.conversation_id);
+          return this.sendEnvelope(counterparty.handle, relayText, frame.envelope.conversation_id);
         },
+        markRead: async () => this.sendFrame({ kind: "ACK", messageId: frame.envelope.message_id, state: "READ" }),
       });
     }
   }
@@ -288,4 +337,9 @@ export class Agent {
     if (this.errorHandler) this.errorHandler(normalized);
     else queueMicrotask(() => { throw normalized; });
   }
+}
+
+function reconnectDelay(attempt: number): number {
+  const exponential = Math.min(30_000, 500 * (2 ** Math.min(attempt, 6)));
+  return exponential + Math.floor(Math.random() * Math.max(1, Math.floor(exponential * 0.2)));
 }

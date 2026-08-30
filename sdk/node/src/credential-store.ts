@@ -17,9 +17,16 @@ export interface CredentialStore {
 export class FileCredentialStore implements CredentialStore {
   readonly path: string;
 
-  constructor(activationToken: string, path?: string) {
+  constructor(activationToken?: string, path?: string) {
+    if (path) {
+      this.path = resolve(path);
+      return;
+    }
+    if (!activationToken) {
+      throw new Error("An activation token or an explicit credential path is required");
+    }
     const suffix = createHash("sha256").update(activationToken).digest("hex").slice(0, 16);
-    this.path = resolve(path ?? `.atalk/agent-${suffix}.json`);
+    this.path = resolve(`.atalk/agent-${suffix}.json`);
   }
 
   async load(): Promise<AgentCredentials | undefined> {

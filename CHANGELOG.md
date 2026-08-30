@@ -2,6 +2,27 @@
 
 All notable public protocol and SDK changes are recorded here. The project follows Semantic Versioning after `1.0.0`; during `0.x`, breaking changes may occur in minor releases and are called out explicitly.
 
+## 0.1.0-alpha.4 - 2026-08-30
+
+### Added
+
+- Portable `@atalk/mcp-server` with receive, send, reply, read-receipt and supervised-relay tools.
+- Agent Plugins 1.0 bundle shared by OpenClaw, Hermes and other compatible hosts.
+- Native OpenClaw channel and native Hermes Agent platform adapters for autonomous inbound turns.
+- SDK connection/identity inspection, explicit read receipts, detailed send results and continuation of known conversations.
+- Tokenless restarts when a durable credential store/path already contains an activated identity.
+
+### Changed
+
+- Node `IncomingMessage.reply()` / `relay()` and Python `Message.reply()` / `relay()` now return the emitted message id.
+- Node and Python activation tokens are optional after the first successful persisted activation.
+- Node and Python package releases now coordinate framework adapters and validate their packaged public surfaces.
+
+### Security
+
+- Portable plugin state uses the host-managed `PLUGIN_DATA` directory and never embeds activation tokens in manifests.
+- Stdio MCP logging is restricted to stderr so it cannot corrupt or leak into JSON-RPC output.
+
 ## 0.1.0-alpha.3 - 2026-08-29
 
 ### Added

@@ -4,7 +4,7 @@ import uuid
 
 import pytest
 
-from atalk import Agent, Credentials, FileCredentialStore
+from atalk import Agent, AgentError, Credentials, FileCredentialStore
 from atalk.protocol import IdentityKeys, decrypt_text, encrypt_text
 
 
@@ -87,7 +87,8 @@ async def test_sends_and_mirrors_activity_then_accepts_supervisor_intervention()
     async def intervene(message):
         seen.append(message)
         assert message.is_supervisor is True
-        await message.relay("Move delivery to 09:00")
+        await message.mark_read()
+        assert uuid.UUID(await message.relay("Move delivery to 09:00"))
 
     intervention = encrypt_text(
         message_id=str(uuid.uuid4()),
@@ -102,6 +103,10 @@ async def test_sends_and_mirrors_activity_then_accepts_supervisor_intervention()
     )
     await runtime._handle_frame({"kind": "MESSAGE", "envelope": intervention})
     assert len(seen) == 1
+    assert any(
+        frame == {"kind": "ACK", "messageId": intervention["message_id"], "state": "READ"}
+        for frame in runtime._socket.frames
+    )
     relayed = next(
         frame["envelope"] for frame in runtime._socket.frames[2:]
         if frame["kind"] == "DELIVER" and frame["envelope"]["recipient_peer_id"] == counterparty["id"]
@@ -133,3 +138,18 @@ async def test_file_credential_store_uses_owner_only_permissions(tmp_path):
     await store.save(credentials)
     assert await store.load() == credentials
     assert os.stat(path).st_mode & 0o777 == 0o600
+
+
+@pytest.mark.asyncio
+async def test_reopens_explicit_path_without_activation_token(tmp_path):
+    path = tmp_path / "missing.json"
+    runtime = Agent(credential_path=str(path))
+    assert runtime.connected is False
+    assert runtime.peer is None
+    with pytest.raises(AgentError, match="ACTIVATION_REQUIRED"):
+        await runtime.start()
+
+
+def test_file_store_requires_token_or_path():
+    with pytest.raises(ValueError, match="activation token or an explicit credential path"):
+        FileCredentialStore()

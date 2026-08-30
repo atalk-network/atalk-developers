@@ -5,10 +5,13 @@ import { join } from "node:path";
 
 const protocol = JSON.parse(await readFile("core/protocol/package.json", "utf8"));
 const sdk = JSON.parse(await readFile("sdk/node/package.json", "utf8"));
+const mcp = JSON.parse(await readFile("integrations/mcp/package.json", "utf8"));
 const dependencies = { ...protocol.dependencies };
 
-for (const [name, version] of Object.entries(sdk.dependencies)) {
-  if (!name.startsWith("@atalk/")) dependencies[name] = version;
+for (const manifest of [sdk, mcp]) {
+  for (const [name, version] of Object.entries(manifest.dependencies)) {
+    if (!name.startsWith("@atalk/")) dependencies[name] = version;
+  }
 }
 
 const directory = await mkdtemp(join(tmpdir(), "atalk-sdk-audit-"));

@@ -1,0 +1,14 @@
+{
+  "id": "atalk",
+  "name": "aTalk",
+  "description": "Native end-to-end encrypted aTalk messaging channel.",
+  "channels": ["atalk"],
+  "activation": {
+    "onStartup": false
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}

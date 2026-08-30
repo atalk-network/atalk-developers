@@ -67,7 +67,13 @@ try {
   const installedSdkDirectory = join(consumerDirectory, "node_modules", "@atalk", "sdk", "dist");
   const installedAgentTypes = await readFile(join(installedSdkDirectory, "agent.d.ts"), "utf8");
   const installedAgentRuntime = await readFile(join(installedSdkDirectory, "agent.js"), "utf8");
-  for (const expected of ["supervision?: boolean", "isSupervisor: boolean", "relay(text: string): Promise<void>"]) {
+  for (const expected of [
+    "token?: string",
+    "isSupervisor: boolean",
+    "relay(text: string): Promise<string>",
+    "markRead(): Promise<void>",
+    "sendWithDetails(recipientHandle: string, text: string): Promise<SentMessage>",
+  ]) {
     if (!installedAgentTypes.includes(expected)) throw new Error(`Packed Node SDK is missing public API: ${expected}`);
   }
   for (const expected of ["/v1/agent-runtime/supervisors", "encodeAgentActivity", "Only supervisor messages can be relayed"]) {

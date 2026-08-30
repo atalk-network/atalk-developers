@@ -12,8 +12,9 @@ target/
 **/build/
 sdk/python/.venv/
 sdk/python/.pytest_cache/
-sdk/python/**/__pycache__/
-sdk/python/**/*.pyc
+**/.pytest_cache/
+**/__pycache__/
+**/*.pyc
 sdk/python/dist/
 core/node-native/*.node
 core/node-native/LICENSE

@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { generateIdentityKeys } from "@atalk/protocol";
 import { afterEach, describe, expect, it } from "vitest";
+import { Agent } from "./agent.js";
 import { FileCredentialStore } from "./credential-store.js";
 import { RUST_CORE_VERSION } from "./native-core.js";
 
@@ -37,5 +38,19 @@ describe("published Node SDK surface", () => {
     await store.save(credentials);
     await expect(store.load()).resolves.toEqual(credentials);
     expect((await stat(path)).mode & 0o777).toBe(0o600);
+  });
+
+  it("can reopen an explicit credential path without retaining an activation token", async () => {
+    directory = await mkdtemp(join(tmpdir(), "atalk-sdk-reopen-"));
+    const path = join(directory, "credentials.json");
+    const store = new FileCredentialStore(undefined, path);
+    expect(store.path).toBe(path);
+    const agent = new Agent({ credentialPath: path });
+    expect(agent.connected).toBe(false);
+    expect(agent.peer).toBeUndefined();
+  });
+
+  it("requires either a token or an explicit credential path", () => {
+    expect(() => new FileCredentialStore()).toThrow("activation token or an explicit credential path");
   });
 });
