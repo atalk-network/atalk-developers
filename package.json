@@ -1,6 +1,6 @@
 {
   "name": "atalk-developers",
-  "version": "0.1.0-alpha.5",
+  "version": "0.1.0-alpha.6",
   "private": true,
   "description": "Public protocol, Rust core and SDK workspace for the aTalk messaging network",
   "packageManager": "pnpm@11.19.0",

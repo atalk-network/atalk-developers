@@ -1,6 +1,6 @@
 {
   "name": "@atalk/core-native",
-  "version": "0.1.0-alpha.5",
+  "version": "0.1.0-alpha.6",
   "description": "Prebuilt Rust cryptography and authorization core for aTalk Node.js clients",
   "main": "index.js",
   "types": "index.d.ts",

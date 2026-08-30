@@ -2,6 +2,12 @@
 
 All notable public protocol and SDK changes are recorded here. The project follows Semantic Versioning after `1.0.0`; during `0.x`, breaking changes may occur in minor releases and are called out explicitly.
 
+## 0.1.0-alpha.6 - 2026-08-30
+
+### Fixed
+
+- Declare OpenClaw `channelConfigs` metadata so setup and Control UI surfaces can discover the aTalk channel schema before loading runtime code.
+
 ## 0.1.0-alpha.5 - 2026-08-30
 
 ### Fixed
