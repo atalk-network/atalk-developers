@@ -45,6 +45,19 @@ jobs:
           python -m pytest sdk/python/tests
           python -m build sdk/python
           python -m twine check sdk/python/dist/*
+      - name: Verify built Python SDK public surface
+        run: |
+          python -m venv "$RUNNER_TEMP/atalk-wheel-smoke"
+          "$RUNNER_TEMP/atalk-wheel-smoke/bin/pip" install sdk/python/dist/*.whl
+          "$RUNNER_TEMP/atalk-wheel-smoke/bin/python" - <<'PY'
+          import inspect
+          from atalk import Agent, Message
+
+          assert "supervision" in inspect.signature(Agent).parameters
+          assert "is_supervisor" in Message.__dataclass_fields__
+          assert hasattr(Message, "relay")
+          print("Verified packaged Python supervision API")
+          PY
       - uses: actions/upload-artifact@v7
         with:
           name: python-package-distributions

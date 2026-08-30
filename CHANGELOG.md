@@ -6,13 +6,16 @@ All notable public protocol and SDK changes are recorded here. The project follo
 
 ### Added
 
-- Python runtime supervision with encrypted activity mirrors and supervisor intervention.
-- Async error handling, pluggable credential stores, delivery-receipt acknowledgement and explicit shutdown.
+- Node and Python runtime supervision with encrypted activity mirrors and supervisor intervention.
+- `supervision` runtime configuration, supervisor markers on incoming messages and `relay()` for human intervention in an active agent conversation.
+- A canonical agent-activity payload in `@atalk/protocol`.
+- Python async error handling, pluggable credential stores, delivery-receipt acknowledgement and explicit shutdown.
 
 ### Changed
 
 - **Breaking (Python):** `Agent.start()` now returns after the authenticated connection is ready; use `Agent.run()` for a blocking standalone runtime.
 - **Breaking (Python):** `Agent.send()` now returns the conversation ID, matching the Node SDK.
+- Node `Agent.start()` now resolves only after the authenticated WebSocket is ready, and revoked runtime credentials terminate the session instead of reconnecting forever.
 - Python reconnects with exponential backoff and treats revoked runtime credentials as a terminal session error.
 
 ## 0.1.0-alpha.2 - 2026-08-28

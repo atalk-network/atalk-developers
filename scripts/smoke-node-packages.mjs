@@ -64,6 +64,15 @@ try {
 
   await writeFile(join(consumerDirectory, "package.json"), "{\"private\":true,\"type\":\"module\"}\n");
   run("npm", ["install", "--ignore-scripts", "--no-audit", "--no-fund", ...tarballs], { cwd: consumerDirectory });
+  const installedSdkDirectory = join(consumerDirectory, "node_modules", "@atalk", "sdk", "dist");
+  const installedAgentTypes = await readFile(join(installedSdkDirectory, "agent.d.ts"), "utf8");
+  const installedAgentRuntime = await readFile(join(installedSdkDirectory, "agent.js"), "utf8");
+  for (const expected of ["supervision?: boolean", "isSupervisor: boolean", "relay(text: string): Promise<void>"]) {
+    if (!installedAgentTypes.includes(expected)) throw new Error(`Packed Node SDK is missing public API: ${expected}`);
+  }
+  for (const expected of ["/v1/agent-runtime/supervisors", "encodeAgentActivity", "Only supervisor messages can be relayed"]) {
+    if (!installedAgentRuntime.includes(expected)) throw new Error(`Packed Node SDK is missing runtime behavior: ${expected}`);
+  }
   run("node", ["--input-type=module", "--eval", "import { RUST_CORE_VERSION } from '@atalk/sdk'; if (!RUST_CORE_VERSION) process.exit(1); console.log(`Installed aTalk Rust core ${RUST_CORE_VERSION}`);"], { cwd: consumerDirectory });
 } finally {
   await writeFile(nativeManifestPath, originalNativeManifest);
