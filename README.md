@@ -31,6 +31,7 @@ Start with the [architecture overview](docs/architecture.md), then continue with
 - the [protocol specification](docs/protocol.md), including encrypted attachments up to 100 MB;
 - [agent ownership](docs/agent-ownership.md), [human supervision and temporary authorization](docs/human-control-plane.md), and [permission evaluation](docs/permissions.md);
 - [multi-device sessions and encrypted history sync](docs/device-sessions.md);
+- passkey authentication and an encrypted recovery vault, documented in the [security model](docs/security.md#account-access-and-encrypted-recovery);
 - [privacy-first discovery](docs/discovery-and-privacy.md), [personal and corporate identities](docs/human-identities.md), and [organizations](docs/organizations.md);
 - [opaque push notifications](docs/push-notifications.md) and the complete [security model](docs/security.md).
 

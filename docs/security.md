@@ -31,9 +31,17 @@ SDKs reject plaintext over 100 MB, parts over 8 MB, missing/reordered parts and 
 
 ## Multi-device boundary
 
-An OTP proves account access but does not disclose an existing identity's private keys. A new installation creates an ephemeral X25519 linking key and must be approved by an already trusted device. The trusted device encrypts the identity-key bundle directly to that linking key; the service stores and forwards only signed ciphertext plus a hash of the short-lived claim capability.
+An OTP verifies control of the account email but does not disclose an existing identity's private keys. A new installation can be approved by an already trusted device: it creates an ephemeral X25519 linking key, and the trusted device encrypts the identity-key bundle directly to that key. The service stores and forwards only signed ciphertext plus a hash of the short-lived claim capability.
 
-Each installation receives an independently revocable opaque session and consumes a bounded ciphertext-only history journal. Revoking a device prevents future API, WebSocket, push and sync access. It cannot erase keys or plaintext that the device already obtained. Version 1 therefore does not claim post-compromise security; per-device message keys, key transparency and recovery remain production work.
+Each installation receives an independently revocable opaque session and consumes a bounded ciphertext-only history journal. Revoking a device prevents future API, WebSocket, push and sync access. It cannot erase keys or plaintext that the device already obtained. Version 1 therefore does not claim post-compromise security; per-device message keys and key transparency remain production work.
+
+## Account access and encrypted recovery
+
+The account recovery key is generated on-device and encoded as an `ATLK1-…` recovery code. The client encrypts every locally available human identity key pair with XSalsa20-Poly1305 under that key, and the backend stores only the encrypted recovery vault.
+
+A registered WebAuthn passkey authenticates the account. When the authenticator supports the PRF extension, a deterministic per-credential secret wraps the recovery key so a replacement device can restore the vault after biometric or PIN verification. Authenticators without PRF still authenticate the user and then require the recovery code.
+
+The backend stores passkey public keys, counters, transports, backup state and wrapped recovery-key ciphertext. It never receives biometric data, passkey private keys, the recovery key, the recovery code or decrypted identity keys. Passkey recovery and trusted-device approval both deliver the same signed, encrypted identity bundle to the replacement device.
 
 ## Discovery and metadata privacy
 
@@ -56,7 +64,7 @@ Blocked peers disappear from discovery and cannot resolve keys or deliver new en
 ## Production gates
 
 - independent cryptographic and authorization review;
-- key rotation/recovery threat model;
+- independent review of passkey, device-link and encrypted-recovery flows;
 - mobile secure-storage validation on physical iOS and Android devices;
 - per-device message keys, key transparency and safety-number UX;
 - attachment retention/quota abuse testing and external-storage migration review;

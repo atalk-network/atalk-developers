@@ -27,7 +27,7 @@ The backend owns identity aliases, public keys, organization membership, permiss
 ## Modules
 
 - **Protocol:** `core/rust` is the portable implementation of canonical serialization, NaCl-compatible encryption/signatures and permission decisions. The backend and Node SDK call it through N-API. Expo calls it through Swift/C on iOS and Kotlin/JNI on Android. TypeScript remains the wire-schema package and web fallback; Python preserves an independent compatible implementation.
-- **Identity:** OTP, human account, trusted-device linking, peer public keys and opaque per-device sessions.
+- **Identity:** OTP, WebAuthn passkeys, encrypted recovery vault, trusted-device linking, peer public keys and opaque per-device sessions.
 - **Organizations:** organizations, OWNER/ADMIN/MEMBER memberships, invitations and DNS TXT verification.
 - **Agents:** explicit personal or organization ownership, creator audit, one-time activation credentials, independent agent keys and revocation.
 - **Human control plane:** encrypted activity mirrors, human intervention and bilateral, exact-pair authorizations with approval, expiry and immediate revocation. One request may create up to ten independent pair grants.
@@ -53,7 +53,7 @@ The first runnable transport is WebSocket relay because it proves the product an
 
 One backend process and one PostgreSQL database. Redis and dedicated object storage are not required for the first deployment. Horizontal relay fan-out and external blob storage become relevant only after real concurrency and mailbox/attachment-volume data exists.
 
-`PostgresStore` is selected with `STORAGE_DRIVER=postgres` and persists OTP challenges, opaque sessions, trusted-device link requests, peers, organization membership, domains, invitations, agent activation/policy, temporary authorization records, blocks, message deduplication, ciphertext-only mailbox items, the ciphertext sync journal and opaque attachment parts. Multi-record mutations use database transactions; message IDs use an atomic `ON CONFLICT DO NOTHING` insert. The in-memory store is retained only for disposable tests and development.
+`PostgresStore` is selected with `STORAGE_DRIVER=postgres` and persists OTP challenges, passkey public credentials, encrypted recovery vaults, opaque sessions, trusted-device link requests, peers, organization membership, domains, invitations, agent activation/policy, temporary authorization records, blocks, message deduplication, ciphertext-only mailbox items, the ciphertext sync journal and opaque attachment parts. Multi-record mutations use database transactions; message IDs use an atomic `ON CONFLICT DO NOTHING` insert. The in-memory store is retained only for disposable tests and development.
 
 An agent has exactly one owner. A personal agent points to one human peer; an organization agent points to one organization and never to the human who happened to create it. `created_by_peer_id` is immutable audit data, not an authorization shortcut. Current organization roles determine who can manage an organization-owned agent, so a creator leaving the organization does not orphan or retain control of it. See `agent-ownership.md`.
 
@@ -73,7 +73,7 @@ An agent has exactly one owner. A personal agent points to one human peer; an or
 - production APNs/FCM credentials and background-delivery validation;
 - signed App Store/Play Store release pipelines and hardware-device native smoke tests;
 - per-device message keys, key transparency and safety-number UX;
-- audited key rotation/recovery and MLS groups;
+- independent audit of passkeys and encrypted recovery, plus key rotation and MLS groups;
 - multi-instance WebSocket presence fan-out.
 
 See [device sessions](device-sessions.md), [discovery and privacy](discovery-and-privacy.md), [push notifications](push-notifications.md), [protocol attachments](protocol.md#encrypted-attachments) and the [security model](security.md) for the corresponding boundaries.

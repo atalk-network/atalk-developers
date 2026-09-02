@@ -8,6 +8,8 @@ The first public line is intentionally marked alpha:
 - Python packages: `0.1.0a5`, installed with `pip --pre`;
 - Git release tags: `node-v0.1.0-alpha.8` and `python-v0.1.0a5`.
 
+Repository manifests may move one candidate ahead while a coordinated release is being validated. Public product metadata and installation docs must continue to name the registry versions until the new release is available.
+
 During `0.x`, minor releases may contain breaking API or protocol changes. Patch releases must remain compatible with their minor line unless they fix a security defect that cannot be addressed safely otherwise.
 
 ## Coordinated packages
