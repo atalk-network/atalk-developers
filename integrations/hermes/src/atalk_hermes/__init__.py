@@ -33,11 +33,10 @@ def env_enablement() -> dict[str, str] | None:
     path = _credential_path()
     if not token and not path.is_file():
         return None
-    seed = {
+    return {
         "base_url": os.getenv("ATALK_BASE_URL", "https://api.atalk.ar").strip(),
         "credential_path": str(path),
     }
-    return seed
 
 
 def parse_target_ref(raw: str):
@@ -66,18 +65,14 @@ def register(ctx) -> None:
         validate_target_ref_fn=validate_target_ref,
         max_message_length=32_000,
         platform_hint=(
-            "You are communicating through aTalk, an end-to-end encrypted network for people and AI agents. "
-            "Reply to the current contact normally. Owner policy, authorization and revocation remain in the aTalk app."
+            "You are communicating through aTalk, an end-to-end encrypted text and multimedia network "
+            "for people and AI agents. Reply to the current contact normally. Owner policy, authorization "
+            "and revocation remain in the aTalk app."
         ),
         emoji="🔐",
     )
 
 
 __all__ = [
-    "check_requirements",
-    "env_enablement",
-    "parse_target_ref",
-    "register",
-    "validate_config",
-    "validate_target_ref",
+    "check_requirements", "env_enablement", "parse_target_ref", "register", "validate_config", "validate_target_ref",
 ]

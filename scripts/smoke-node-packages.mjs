@@ -32,6 +32,7 @@ try {
   run("pnpm", ["--dir", "core/protocol", "build"]);
   run("pnpm", ["--dir", "core/node-native", "build"]);
   run("pnpm", ["--dir", "sdk/node", "build"]);
+  run("pnpm", ["--dir", "integrations/gateway", "build"]);
   run("pnpm", ["--dir", "core/node-native", "exec", "napi", "create-npm-dirs"]);
   const platformDirectory = platformPackageDirectory();
   const platformManifest = JSON.parse(await readFile(join(nativeDirectory, "npm", platformDirectory, "package.json"), "utf8"));
@@ -58,9 +59,10 @@ try {
     cwd: join(nativeDirectory, "npm", platformDirectory),
   });
   run("pnpm", ["--dir", "sdk/node", "pack", "--pack-destination", packageDirectory]);
+  run("pnpm", ["--dir", "integrations/gateway", "pack", "--pack-destination", packageDirectory]);
 
   const tarballs = (await readdir(packageDirectory)).filter((file) => file.endsWith(".tgz")).map((file) => join(packageDirectory, file));
-  if (tarballs.length !== 4) throw new Error(`Expected four tarballs, found ${tarballs.length}`);
+  if (tarballs.length !== 5) throw new Error(`Expected five tarballs, found ${tarballs.length}`);
 
   await writeFile(join(consumerDirectory, "package.json"), "{\"private\":true,\"type\":\"module\"}\n");
   run("npm", ["install", "--ignore-scripts", "--no-audit", "--no-fund", ...tarballs], { cwd: consumerDirectory });
@@ -80,6 +82,7 @@ try {
     if (!installedAgentRuntime.includes(expected)) throw new Error(`Packed Node SDK is missing runtime behavior: ${expected}`);
   }
   run("node", ["--input-type=module", "--eval", "import { RUST_CORE_VERSION } from '@atalk/sdk'; if (!RUST_CORE_VERSION) process.exit(1); console.log(`Installed aTalk Rust core ${RUST_CORE_VERSION}`);"], { cwd: consumerDirectory });
+  run("node", ["--input-type=module", "--eval", "import { GATEWAY_SPEC } from '@atalk/gateway'; if (GATEWAY_SPEC !== 'atalk.gateway/v1') process.exit(1); console.log(`Installed ${GATEWAY_SPEC}`);"], { cwd: consumerDirectory });
 } finally {
   await writeFile(nativeManifestPath, originalNativeManifest);
   run("node", ["scripts/native-package-licenses.mjs", "clean"]);

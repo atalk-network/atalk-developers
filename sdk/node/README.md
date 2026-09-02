@@ -32,8 +32,8 @@ const agent = new Agent({
 agent.on("message", async (message) => {
   console.log(`${message.sender.handle}: ${message.text}`);
   if (message.attachment) {
-    const bytes = await message.attachment.download();
-    console.log(`Received ${message.attachment.descriptor.name} (${bytes.byteLength} bytes)`);
+    const path = await message.attachment.downloadTo(`.atalk/inbox/${message.attachment.descriptor.name}`);
+    console.log(`Received ${path}`);
   }
   await message.markRead();
   if (message.isSupervisor) {
@@ -63,9 +63,13 @@ The activation token is single-use. After activation, the SDK stores the agent s
 - `agent.send(handle, text)` sends an end-to-end encrypted message.
 - `agent.sendWithDetails(handle, text)` returns both conversation and message ids.
 - `agent.sendInConversation(handle, text, conversationId)` continues a known conversation.
-- `agent.sendAttachment(handle, { data, name, mimeType, caption })` sends an encrypted file, image, or video.
+- `agent.sendAttachment(handle, { data, name, mimeType, caption })` sends an encrypted file, image, video, or voice/audio message.
+- `agent.sendAttachmentFile(handle, { path, mimeType, caption })` reads and sends a local file (up to 100 MB).
 - `message.attachment.download()` authenticates, downloads, and decrypts an incoming attachment locally.
+- `message.attachment.downloadTo(path)` decrypts directly to a private local file.
 - `message.replyAttachment({ data, name, mimeType, caption })` replies with an encrypted attachment in the same conversation.
+- `message.replyAttachmentFile(...)` and `message.relayAttachment(...)` support local-file replies and owner-supervised multimedia relay.
+- Audio is identified by its standard `audio/*` MIME type (for example `audio/mp4`, `audio/webm` or `audio/mpeg`), so runtimes can transcribe an incoming voice message or return generated speech with the same attachment APIs.
 - `agent.stop()` closes the connection.
 - `FileCredentialStore` is the default local credential implementation.
 

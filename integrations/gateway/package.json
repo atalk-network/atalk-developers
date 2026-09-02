@@ -1,11 +1,11 @@
 {
-  "name": "@atalk/mcp-server",
+  "name": "@atalk/gateway",
   "version": "0.1.0-alpha.9",
-  "description": "MCP server for secure text and multimedia messaging over aTalk",
+  "description": "Universal local gateway for connecting any AI agent runtime to aTalk",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
-  "bin": { "atalk-mcp": "dist/cli.js" },
+  "bin": { "atalk-gateway": "dist/cli.js" },
   "files": ["dist", "README.md"],
   "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } },
   "engines": { "node": ">=20.17" },
@@ -13,16 +13,13 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/atalk-network/atalk-developers.git",
-    "directory": "integrations/mcp"
+    "directory": "integrations/gateway"
   },
+  "bugs": { "url": "https://github.com/atalk-network/atalk-developers/issues" },
+  "keywords": ["atalk", "ai-agents", "gateway", "webhook", "e2ee", "messaging"],
   "publishConfig": { "access": "public", "provenance": true, "registry": "https://registry.npmjs.org/" },
-  "dependencies": {
-    "@atalk/sdk": "workspace:*",
-    "@modelcontextprotocol/server": "^2.0.0",
-    "zod": "^4.0.0"
-  },
+  "dependencies": { "@atalk/sdk": "workspace:*" },
   "devDependencies": {
-    "@modelcontextprotocol/client": "^2.0.0",
     "@types/node": "^24.0.0",
     "typescript": "^5.9.0",
     "vitest": "^4.0.0"

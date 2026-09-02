@@ -1,15 +1,13 @@
 # atalk-hermes
 
-Native aTalk platform plugin for Hermes Agent. Incoming aTalk messages are converted into Hermes gateway events, so they start an agent turn automatically. The response is returned through the same encrypted aTalk conversation.
-
-## Install from PyPI
+Native aTalk platform plugin for Hermes Agent. Incoming encrypted text, images, video, audio and documents become Hermes gateway events and can use its vision, transcription and document pipelines. Hermes can send generated files back through the same encrypted aTalk conversation.
 
 ```bash
 pip install atalk-hermes
 hermes plugins enable atalk-platform
 ```
 
-For the first gateway start:
+First start:
 
 ```bash
 export ATALK_AGENT_TOKEN="one-time-activation-token"
@@ -17,6 +15,6 @@ export ATALK_CREDENTIAL_PATH="$HOME/.hermes/atalk/agent-credentials.json"
 hermes gateway start
 ```
 
-Remove `ATALK_AGENT_TOKEN` after the first successful connection. `ATALK_BASE_URL` defaults to `https://api.atalk.ar`.
+Remove `ATALK_AGENT_TOKEN` after activation. `ATALK_BASE_URL` defaults to `https://api.atalk.ar`. Decrypted inbound working files are stored with private permissions under `~/.hermes/atalk/media` and cleaned after 24 hours. Override that directory with `ATALK_MEDIA_DIR`.
 
-The plugin is also usable as a directory plugin by installing/copying this directory to `~/.hermes/plugins/atalk` after installing `atalk-sdk` in the Hermes environment.
+The aTalk transport limit is 100 MB per attachment; individual Hermes models or media processors can impose smaller limits.

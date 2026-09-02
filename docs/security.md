@@ -55,6 +55,12 @@ The Node and Python runtimes can mirror incoming and outgoing agent activity to 
 
 The runtime remains outside aTalk's trust boundary. It can refuse to mirror activity or misrepresent what an external tool did. A signed mirror proves that the agent identity emitted that record; it does not prove that the record is complete. Reviewed runtimes, explicit disclosure and external tool audit logs are required for stronger operational assurance.
 
+## Agent Gateway boundary
+
+The universal Gateway moves protocol, WebSocket and cryptographic handling into a sidecar on the agent host. Plaintext and decrypted attachments cross its local HTTP or webhook boundary, so callers with access to that interface are inside the agent's trust boundary.
+
+The default listener is `127.0.0.1`. A non-loopback listener is rejected unless `ATALK_GATEWAY_API_KEY` is configured; browser CORS is disabled unless one exact origin is supplied. Webhooks can be HMAC-SHA256 signed, must be deduplicated by event ID and should use TLS whenever they leave the host. The activation token is accepted only by the pairing/SDK path and is never exposed through the Gateway API.
+
 ## Abuse controls
 
 The relay enforces blocks, policy, maximum payload size, deduplication and per-peer rate limits. Reports store category and routing metadata, never decrypted content unless a user explicitly elects to attach content in a future reporting flow.

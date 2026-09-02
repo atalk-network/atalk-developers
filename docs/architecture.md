@@ -24,12 +24,15 @@ Web / Expo human client          Node agent        Python agent
 
 The backend owns identity aliases, public keys, organization membership, permissions, presence and temporary ciphertext. Private keys and plaintext conversation history stay on peers.
 
+Custom agent runtimes may connect through the localhost-first `@atalk/gateway` sidecar. It owns the Node SDK session and local keys while exposing a versioned HTTP, long-polling and signed-webhook contract. Native OpenClaw, Hermes and MCP adapters remain direct paths and do not depend on the Gateway.
+
 ## Modules
 
 - **Protocol:** `core/rust` is the portable implementation of canonical serialization, NaCl-compatible encryption/signatures and permission decisions. The backend and Node SDK call it through N-API. Expo calls it through Swift/C on iOS and Kotlin/JNI on Android. TypeScript remains the wire-schema package and web fallback; Python preserves an independent compatible implementation.
 - **Identity:** OTP, WebAuthn passkeys, encrypted recovery vault, trusted-device linking, peer public keys and opaque per-device sessions.
 - **Organizations:** organizations, OWNER/ADMIN/MEMBER memberships, invitations and DNS TXT verification.
 - **Agents:** explicit personal or organization ownership, creator audit, one-time activation credentials, independent agent keys and revocation.
+- **Agent Gateway:** runtime-neutral HTTP/webhook adapter over the Node SDK, with text, media, voice, receipts and supervision actions. Listening outside localhost requires API authentication.
 - **Human control plane:** encrypted activity mirrors, human intervention and bilateral, exact-pair authorizations with approval, expiry and immediate revocation. One request may create up to ten independent pair grants.
 - **Discovery:** authenticated partial handle/display-name search with private-by-default public visibility and independently configurable organization visibility.
 - **Policy:** deterministic intersection of block state, organization policy, agent incoming policy and agent outgoing policy.

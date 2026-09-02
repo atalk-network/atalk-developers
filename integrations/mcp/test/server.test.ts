@@ -33,11 +33,15 @@ describe("aTalk MCP server", () => {
 
     const listed = await client.listTools();
     expect(listed.tools.map(({ name }) => name).sort()).toEqual([
+      "atalk_download_attachment",
       "atalk_mark_read",
       "atalk_receive",
       "atalk_relay_supervision",
       "atalk_reply",
+      "atalk_reply_attachment",
+      "atalk_save_attachment",
       "atalk_send",
+      "atalk_send_attachment",
       "atalk_send_in_conversation",
       "atalk_status",
     ]);

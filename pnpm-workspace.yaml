@@ -2,6 +2,7 @@ packages:
   - "core/protocol"
   - "core/node-native"
   - "sdk/node"
+  - "integrations/gateway"
   - "integrations/mcp"
   - "integrations/openclaw"
   - "integrations/agent-plugin"

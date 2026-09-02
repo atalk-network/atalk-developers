@@ -1,47 +1,22 @@
 {
   "name": "@atalk/openclaw",
-  "version": "0.1.0-alpha.8",
+  "version": "0.1.0-alpha.9",
   "description": "Native aTalk messaging channel for OpenClaw",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
-  "files": [
-    "dist",
-    "openclaw.plugin.json",
-    "README.md"
-  ],
-  "scripts": {
-    "build": "pnpm clean && tsc -p tsconfig.json",
-    "clean": "node --input-type=module -e \"import { rmSync } from 'node:fs'; rmSync('dist', { recursive: true, force: true })\"",
-    "prepack": "pnpm build",
-    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json",
-    "test": "vitest run"
-  },
-  "engines": {
-    "node": ">=24.15 <25 || >=25.9"
-  },
+  "files": ["dist", "openclaw.plugin.json", "README.md"],
+  "engines": { "node": ">=24.15 <25 || >=25.9" },
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/atalk-network/atalk-developers.git",
     "directory": "integrations/openclaw"
   },
-  "publishConfig": {
-    "access": "public",
-    "provenance": true,
-    "registry": "https://registry.npmjs.org/"
-  },
-  "dependencies": {
-    "@atalk/sdk": "workspace:*"
-  },
-  "peerDependencies": {
-    "openclaw": ">=2026.7.1-2"
-  },
-  "peerDependenciesMeta": {
-    "openclaw": {
-      "optional": true
-    }
-  },
+  "publishConfig": { "access": "public", "provenance": true, "registry": "https://registry.npmjs.org/" },
+  "dependencies": { "@atalk/sdk": "workspace:*" },
+  "peerDependencies": { "openclaw": ">=2026.7.1-2" },
+  "peerDependenciesMeta": { "openclaw": { "optional": true } },
   "devDependencies": {
     "@types/node": "^24.0.0",
     "openclaw": "2026.7.1-2",
@@ -56,17 +31,16 @@
       "selectionLabel": "aTalk (encrypted agent network)",
       "detailLabel": "aTalk",
       "docsPath": "https://github.com/atalk-network/atalk-developers/tree/main/integrations/openclaw",
-      "blurb": "End-to-end encrypted messaging between people and AI agents.",
-      "configuredState": {
-        "env": {
-          "anyOf": ["ATALK_AGENT_TOKEN", "ATALK_CREDENTIAL_PATH"]
-        }
-      }
+      "blurb": "End-to-end encrypted text and multimedia messaging between people and AI agents.",
+      "configuredState": { "env": { "anyOf": ["ATALK_AGENT_TOKEN", "ATALK_CREDENTIAL_PATH"] } }
     },
-    "install": {
-      "npmSpec": "@atalk/openclaw",
-      "defaultChoice": "npm",
-      "minHostVersion": ">=2026.7.1-2"
-    }
+    "install": { "npmSpec": "@atalk/openclaw", "defaultChoice": "npm", "minHostVersion": ">=2026.7.1-2" }
+  },
+  "scripts": {
+    "build": "pnpm clean && tsc -p tsconfig.json",
+    "clean": "node --input-type=module -e \"import { rmSync } from 'node:fs'; rmSync('dist', { recursive: true, force: true })\"",
+    "prepack": "pnpm build",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json",
+    "test": "vitest run"
   }
 }

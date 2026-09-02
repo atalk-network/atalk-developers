@@ -136,6 +136,9 @@ jobs:
           pnpm --dir sdk/node build
           pnpm --dir sdk/node typecheck
           pnpm --dir sdk/node test
+          pnpm --dir integrations/gateway build
+          pnpm --dir integrations/gateway typecheck
+          pnpm --dir integrations/gateway test
           pnpm --dir integrations/mcp build
           pnpm --dir integrations/mcp typecheck
           pnpm --dir integrations/mcp test
@@ -150,6 +153,7 @@ jobs:
           npm pack ./core/node-native --dry-run --ignore-scripts
           pnpm --dir core/protocol pack --dry-run
           pnpm --dir sdk/node pack --dry-run
+          pnpm --dir integrations/gateway pack --dry-run
           pnpm --dir integrations/mcp pack --dry-run
           pnpm --dir integrations/openclaw pack --dry-run
           pnpm --dir integrations/agent-plugin pack --dry-run
@@ -167,6 +171,8 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
       - name: Publish Node SDK
         run: node scripts/publish-package-if-missing.mjs sdk/node pnpm next
+      - name: Publish universal Agent Gateway
+        run: node scripts/publish-package-if-missing.mjs integrations/gateway pnpm next
       - name: Publish MCP server
         run: node scripts/publish-package-if-missing.mjs integrations/mcp pnpm next
       - name: Publish portable Agent Plugin

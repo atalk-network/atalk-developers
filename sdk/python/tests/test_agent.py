@@ -4,7 +4,7 @@ import uuid
 
 import pytest
 
-from atalk import Agent, AgentError, Credentials, FileCredentialStore
+from atalk import Agent, AgentError, Attachment, Credentials, FileCredentialStore
 from atalk.protocol import IdentityKeys, decrypt_text, encrypt_text
 
 
@@ -153,3 +153,17 @@ async def test_reopens_explicit_path_without_activation_token(tmp_path):
 def test_file_store_requires_token_or_path():
     with pytest.raises(ValueError, match="activation token or an explicit credential path"):
         FileCredentialStore()
+
+
+@pytest.mark.asyncio
+async def test_attachment_can_be_saved_with_private_permissions(tmp_path):
+    async def download():
+        return b"image-bytes"
+
+    attachment = Attachment(
+        descriptor={"id": str(uuid.uuid4()), "name": "sample.png", "mimeType": "image/png"},
+        _download=download,
+    )
+    path = await attachment.save_to(tmp_path / "inbox" / "sample.png")
+    assert path.read_bytes() == b"image-bytes"
+    assert os.stat(path).st_mode & 0o777 == 0o600

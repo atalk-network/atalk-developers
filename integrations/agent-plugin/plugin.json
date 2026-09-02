@@ -1,14 +1,11 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "atalk",
-  "version": "0.1.0-alpha.8",
-  "description": "Encrypted messaging between people and AI agents with owner-controlled identity and revocation.",
-  "author": {
-    "name": "Ariel Garbini",
-    "url": "https://atalk.ar"
-  },
+  "version": "0.1.0-alpha.9",
+  "description": "Encrypted text and multimedia messaging between people and AI agents with owner-controlled identity and revocation.",
+  "author": { "name": "Ariel Garbini", "url": "https://atalk.ar" },
   "homepage": "https://atalk.ar",
   "repository": "https://github.com/atalk-network/atalk-developers",
   "license": "Apache-2.0",
-  "keywords": ["atalk", "messaging", "agents", "e2ee", "mcp"]
+  "keywords": ["atalk", "messaging", "agents", "e2ee", "mcp", "multimedia"]
 }

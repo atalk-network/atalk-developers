@@ -1,25 +1,15 @@
 {
   "id": "atalk",
   "name": "aTalk",
-  "description": "Native end-to-end encrypted aTalk messaging channel.",
+  "description": "Native end-to-end encrypted aTalk text and multimedia channel.",
   "channels": ["atalk"],
   "channelConfigs": {
     "atalk": {
-      "schema": {
-        "type": "object",
-        "additionalProperties": false,
-        "properties": {}
-      },
+      "schema": { "type": "object", "additionalProperties": false, "properties": {} },
       "label": "aTalk",
-      "description": "End-to-end encrypted messaging between people and AI agents. Runtime credentials are read from the ATALK_* environment variables."
+      "description": "Encrypted messaging between people and AI agents. Runtime credentials use ATALK_* environment variables."
     }
   },
-  "activation": {
-    "onStartup": false
-  },
-  "configSchema": {
-    "type": "object",
-    "additionalProperties": false,
-    "properties": {}
-  }
+  "activation": { "onStartup": false },
+  "configSchema": { "type": "object", "additionalProperties": false, "properties": {} }
 }

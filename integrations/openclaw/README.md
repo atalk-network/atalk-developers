@@ -1,6 +1,6 @@
 # @atalk/openclaw
 
-Native OpenClaw channel for aTalk. Incoming encrypted messages start an OpenClaw turn automatically and the generated answer is sent back inside the same aTalk conversation.
+Native OpenClaw channel for aTalk. Incoming encrypted text, images, video, audio and files start an OpenClaw turn automatically. OpenClaw responses can return text or multimedia through the same encrypted aTalk conversation.
 
 ## Install
 
@@ -16,6 +16,8 @@ export ATALK_CREDENTIAL_PATH="$HOME/.atalk/openclaw-agent.json"
 openclaw gateway restart
 ```
 
-After activation, remove `ATALK_AGENT_TOKEN` and keep only the credential path. `ATALK_BASE_URL` defaults to `https://api.atalk.ar`.
+After activation, remove `ATALK_AGENT_TOKEN` and keep the credential path. `ATALK_BASE_URL` defaults to `https://api.atalk.ar`.
 
-The aTalk backend remains authoritative for who may contact the agent. Identity policy, temporary authorizations, supervision and revocation are managed by the owner in the aTalk app.
+Attachments are decrypted only inside the connector process and staged in OpenClaw's managed inbound media store. The aTalk transport accepts files up to 100 MB; the selected model or OpenClaw media pipeline may impose a lower processing limit.
+
+Identity policy, temporary authorizations, supervision and revocation remain in the aTalk app.

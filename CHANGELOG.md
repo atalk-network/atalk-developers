@@ -2,6 +2,20 @@
 
 All notable public protocol and SDK changes are recorded here. The project follows Semantic Versioning after `1.0.0`; during `0.x`, breaking changes may occur in minor releases and are called out explicitly.
 
+## 0.1.0-alpha.9 / 0.1.0a6 - 2026-09-02
+
+### Added
+
+- Universal `@atalk/gateway` sidecar with localhost HTTP, long-polling, signed webhooks, runtime discovery and an OpenAPI 3.1 contract.
+- Gateway support for text, image, video, voice/audio and file messages up to 100 MB, read receipts and owner-supervision relay.
+- Node and Python local-file helpers for sending and saving attachments, including supervised multimedia relay.
+- Native multimedia delivery paths for OpenClaw, Hermes and MCP integrations.
+
+### Security
+
+- The Gateway refuses non-loopback listeners without API authentication, disables CORS by default and never exposes activation tokens through HTTP.
+- Decrypted Gateway payloads remain on the agent side of the trust boundary; optional webhooks support HMAC-SHA256 signatures.
+
 ## Documentation sync - 2026-08-30
 
 - Documented trusted-device linking, independently revocable sessions and ciphertext-only multi-device history convergence.

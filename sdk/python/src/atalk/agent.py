@@ -92,6 +92,14 @@ class Attachment:
     async def download(self) -> bytes:
         return await self._download()
 
+    async def save_to(self, file_path: str | Path) -> Path:
+        """Decrypt and save the attachment to an explicit local path."""
+        target = Path(file_path).expanduser().resolve()
+        target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        target.write_bytes(await self.download())
+        os.chmod(target, 0o600)
+        return target
+
 
 @dataclass
 class Message:
@@ -105,6 +113,7 @@ class Message:
     _reply: Callable[[str], Awaitable[str]]
     _reply_attachment: Callable[[bytes, str, str, str | None], Awaitable[str]]
     _relay: Callable[[str], Awaitable[str]]
+    _relay_attachment: Callable[[bytes, str, str, str | None], Awaitable[str]]
     _mark_read: Callable[[], Awaitable[None]]
 
     async def reply(self, text: str) -> str:
@@ -115,8 +124,29 @@ class Message:
     ) -> str:
         return await self._reply_attachment(data, name, mime_type, caption)
 
+    async def reply_attachment_file(
+        self, file_path: str | Path, mime_type: str | None = None, caption: str | None = None,
+    ) -> str:
+        path = Path(file_path).expanduser().resolve()
+        return await self.reply_attachment(
+            path.read_bytes(), path.name, mime_type or _mime_type_from_path(path), caption,
+        )
+
     async def relay(self, text: str) -> str:
         return await self._relay(text)
+
+    async def relay_attachment(
+        self, data: bytes, name: str, mime_type: str = "application/octet-stream", caption: str | None = None,
+    ) -> str:
+        return await self._relay_attachment(data, name, mime_type, caption)
+
+    async def relay_attachment_file(
+        self, file_path: str | Path, mime_type: str | None = None, caption: str | None = None,
+    ) -> str:
+        path = Path(file_path).expanduser().resolve()
+        return await self.relay_attachment(
+            path.read_bytes(), path.name, mime_type or _mime_type_from_path(path), caption,
+        )
 
     async def mark_read(self) -> None:
         await self._mark_read()
@@ -242,12 +272,43 @@ class Agent:
         )
         return SentMessage(conversation_id=conversation_id, message_id=message_id)
 
+    async def send_attachment_file(
+        self, recipient_handle: str, file_path: str | Path,
+        mime_type: str | None = None, caption: str | None = None,
+    ) -> str:
+        return (
+            await self.send_attachment_file_with_details(recipient_handle, file_path, mime_type, caption)
+        ).conversation_id
+
+    async def send_attachment_file_with_details(
+        self, recipient_handle: str, file_path: str | Path,
+        mime_type: str | None = None, caption: str | None = None,
+    ) -> SentMessage:
+        path = Path(file_path).expanduser().resolve()
+        return await self.send_attachment_with_details(
+            recipient_handle, path.read_bytes(), path.name, mime_type or _mime_type_from_path(path), caption,
+        )
+
     async def send_attachment_in_conversation(
         self, recipient_handle: str, data: bytes, name: str, conversation_id: str,
         mime_type: str = "application/octet-stream", caption: str | None = None,
     ) -> str:
         return await self._send_attachment_envelope(
             recipient_handle, data, name, mime_type, caption, conversation_id,
+        )
+
+    async def send_attachment_file_in_conversation(
+        self, recipient_handle: str, file_path: str | Path, conversation_id: str,
+        mime_type: str | None = None, caption: str | None = None,
+    ) -> str:
+        path = Path(file_path).expanduser().resolve()
+        return await self.send_attachment_in_conversation(
+            recipient_handle,
+            path.read_bytes(),
+            path.name,
+            conversation_id,
+            mime_type or _mime_type_from_path(path),
+            caption,
         )
 
     async def _activate(self) -> Credentials:
@@ -383,6 +444,16 @@ class Agent:
                     raise RuntimeError("No active counterparty exists for this supervised conversation")
                 return await self._send_envelope(counterparty["handle"], relay_text, envelope["conversation_id"])
 
+            async def relay_attachment(data: bytes, name: str, mime_type: str, caption: str | None) -> str:
+                if not is_supervisor:
+                    raise RuntimeError("Only supervisor messages can be relayed")
+                counterparty = self._counterparties.get(envelope["conversation_id"])
+                if not counterparty:
+                    raise RuntimeError("No active counterparty exists for this supervised conversation")
+                return await self._send_attachment_envelope(
+                    counterparty["handle"], data, name, mime_type, caption, envelope["conversation_id"],
+                )
+
             async def mark_read() -> None:
                 await self._send_frame({"kind": "ACK", "messageId": envelope["message_id"], "state": "READ"})
 
@@ -400,6 +471,7 @@ class Agent:
                 _reply=reply,
                 _reply_attachment=reply_attachment,
                 _relay=relay,
+                _relay_attachment=relay_attachment,
                 _mark_read=mark_read,
             ))
             if inspect.isawaitable(result):
@@ -476,7 +548,7 @@ class Agent:
             "content-type": "application/octet-stream",
         }
         path = f"/v1/attachments/{attachment_id}?recipientPeerId={recipient_peer_id}"
-        async with httpx.AsyncClient(base_url=self._base_url, timeout=30) as client:
+        async with httpx.AsyncClient(base_url=self._base_url, timeout=120) as client:
             response = await client.post(path, headers=headers, content=ciphertext)
         if response.is_error:
             self._raise_http_error(response)
@@ -484,7 +556,7 @@ class Agent:
     async def _download_attachment(self, descriptor: dict[str, Any]) -> bytes:
         headers = {"authorization": f"Bearer {self._require_credentials().session_token}"}
         parts = []
-        async with httpx.AsyncClient(base_url=self._base_url, timeout=30) as client:
+        async with httpx.AsyncClient(base_url=self._base_url, timeout=120) as client:
             for part in attachment_part_descriptors(descriptor):
                 response = await client.get(f"/v1/attachments/{part['id']}", headers=headers)
                 if response.is_error:
@@ -593,3 +665,8 @@ def _parse_timestamp(value: str) -> datetime:
 def _reconnect_delay(attempt: int) -> float:
     base = min(30.0, 0.5 * (2 ** min(attempt, 6)))
     return base + random.uniform(0.1, max(0.1, base * 0.25))
+
+
+def _mime_type_from_path(path: Path) -> str:
+    import mimetypes
+    return mimetypes.guess_type(path.name)[0] or "application/octet-stream"

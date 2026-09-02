@@ -2,19 +2,19 @@ import { defineChannelPluginEntry } from "openclaw/plugin-sdk/channel-core";
 import { atalkPlugin } from "./channel.js";
 import { setAtalkRuntime } from "./runtime.js";
 
+interface PortableChannelEntry {
+  id?: string;
+  name?: string;
+  description?: string;
+  register?: (api: unknown) => void;
+}
+
 const entry = defineChannelPluginEntry({
   id: "atalk",
   name: "aTalk",
-  description: "Native end-to-end encrypted aTalk messaging channel",
+  description: "Native end-to-end encrypted aTalk text and multimedia channel",
   plugin: atalkPlugin,
   setRuntime: setAtalkRuntime,
-});
+}) as unknown as PortableChannelEntry;
 
-// Keep the generated public declaration independent from OpenClaw's hashed
-// internal declaration modules while preserving the full runtime value.
-export default entry as {
-  id: string;
-  name: string;
-  description: string;
-  register(api: unknown): void;
-};
+export default entry;

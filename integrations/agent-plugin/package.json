@@ -1,27 +1,18 @@
 {
   "name": "@atalk/agent-plugin",
-  "version": "0.1.0-alpha.8",
-  "description": "Portable Agent Plugin for secure aTalk messaging",
+  "version": "0.1.0-alpha.9",
+  "description": "Portable Agent Plugin for encrypted aTalk text and multimedia messaging",
   "type": "module",
-  "files": [
-    "plugin.json",
-    "mcp.json",
-    "skills",
-    "README.md"
-  ],
-  "scripts": {
-    "typecheck": "node ../../scripts/validate-agent-plugin.mjs .",
-    "test": "node ../../scripts/validate-agent-plugin.mjs ."
-  },
+  "files": ["plugin.json", "mcp.json", "skills", "README.md"],
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/atalk-network/atalk-developers.git",
     "directory": "integrations/agent-plugin"
   },
-  "publishConfig": {
-    "access": "public",
-    "provenance": true,
-    "registry": "https://registry.npmjs.org/"
+  "publishConfig": { "access": "public", "provenance": true, "registry": "https://registry.npmjs.org/" },
+  "scripts": {
+    "typecheck": "node ../../scripts/validate-agent-plugin.mjs .",
+    "test": "node ../../scripts/validate-agent-plugin.mjs ."
   }
 }

@@ -22,7 +22,10 @@ function message(id: string): IncomingMessage {
     isSupervisor: false,
     reply: vi.fn(async () => "00000000-0000-4000-8000-000000000004"),
     replyAttachment: vi.fn(async () => "00000000-0000-4000-8000-000000000006"),
+    replyAttachmentFile: vi.fn(async () => "00000000-0000-4000-8000-000000000007"),
     relay: vi.fn(async () => "00000000-0000-4000-8000-000000000005"),
+    relayAttachment: vi.fn(async () => "00000000-0000-4000-8000-000000000008"),
+    relayAttachmentFile: vi.fn(async () => "00000000-0000-4000-8000-000000000009"),
     markRead: vi.fn(async () => undefined),
   };
 }

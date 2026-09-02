@@ -7,6 +7,7 @@ export interface SerializableMessage {
   sender: IncomingMessage["sender"];
   receivedAt: string;
   isSupervisor: boolean;
+  attachment?: { id: string; name: string; mimeType: string; kind: "IMAGE" | "VIDEO" | "FILE"; size: number };
 }
 
 export class AgentInbox {
@@ -29,25 +30,14 @@ export class AgentInbox {
     this.waiters.clear();
   }
 
-  get(id: string): IncomingMessage | undefined {
-    return this.known.get(id);
-  }
-
-  get pending(): number {
-    return this.queued.length;
-  }
+  get(id: string): IncomingMessage | undefined { return this.known.get(id); }
+  get pending(): number { return this.queued.length; }
 
   async take(limit: number, waitSeconds: number): Promise<IncomingMessage[]> {
     if (this.queued.length === 0 && waitSeconds > 0) {
       await new Promise<void>((resolve) => {
-        const timer = setTimeout(() => {
-          this.waiters.delete(wake);
-          resolve();
-        }, waitSeconds * 1_000);
-        const wake = () => {
-          clearTimeout(timer);
-          resolve();
-        };
+        const timer = setTimeout(() => { this.waiters.delete(wake); resolve(); }, waitSeconds * 1_000);
+        const wake = () => { clearTimeout(timer); resolve(); };
         this.waiters.add(wake);
       });
     }
@@ -56,6 +46,7 @@ export class AgentInbox {
 }
 
 export function serializeMessage(message: IncomingMessage): SerializableMessage {
+  const descriptor = message.attachment?.descriptor;
   return {
     id: message.id,
     conversationId: message.conversationId,
@@ -63,5 +54,12 @@ export function serializeMessage(message: IncomingMessage): SerializableMessage 
     sender: message.sender,
     receivedAt: message.receivedAt.toISOString(),
     isSupervisor: message.isSupervisor,
+    ...(descriptor ? { attachment: {
+      id: descriptor.id,
+      name: descriptor.name,
+      mimeType: descriptor.mimeType,
+      kind: descriptor.kind,
+      size: descriptor.size,
+    } } : {}),
   };
 }

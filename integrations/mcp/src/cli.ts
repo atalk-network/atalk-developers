@@ -17,7 +17,6 @@ async function shutdown(): Promise<void> {
 
 process.once("SIGINT", () => void shutdown());
 process.once("SIGTERM", () => void shutdown());
-
 main().catch((error: unknown) => {
   console.error(`[aTalk] MCP startup failed: ${error instanceof Error ? error.message : String(error)}`);
   process.exit(1);

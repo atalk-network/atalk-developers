@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { basename, dirname, extname, resolve } from "node:path";
 import {
   decodeAttachmentMessage,
   decryptAttachment,
@@ -37,7 +39,10 @@ export interface IncomingMessage {
   isSupervisor: boolean;
   reply(text: string): Promise<string>;
   replyAttachment(input: AgentAttachmentInput): Promise<string>;
+  replyAttachmentFile(input: AgentAttachmentFileInput): Promise<string>;
   relay(text: string): Promise<string>;
+  relayAttachment(input: AgentAttachmentInput): Promise<string>;
+  relayAttachmentFile(input: AgentAttachmentFileInput): Promise<string>;
   markRead(): Promise<void>;
 }
 
@@ -48,9 +53,18 @@ export interface AgentAttachmentInput {
   caption?: string;
 }
 
+export interface AgentAttachmentFileInput {
+  path: string;
+  name?: string;
+  mimeType?: string;
+  caption?: string;
+}
+
 export interface IncomingAttachment {
   descriptor: AttachmentDescriptor;
   download(): Promise<Uint8Array>;
+  /** Decrypt and save the attachment to an explicit local path. */
+  downloadTo(filePath: string): Promise<string>;
 }
 
 export interface SentMessage {
@@ -142,12 +156,31 @@ export class Agent {
     return { conversationId, messageId };
   }
 
+  async sendAttachmentFile(recipientHandle: string, input: AgentAttachmentFileInput): Promise<string> {
+    return (await this.sendAttachmentFileWithDetails(recipientHandle, input)).conversationId;
+  }
+
+  async sendAttachmentFileWithDetails(
+    recipientHandle: string,
+    input: AgentAttachmentFileInput,
+  ): Promise<SentMessage> {
+    return this.sendAttachmentWithDetails(recipientHandle, await attachmentInputFromFile(input));
+  }
+
   async sendAttachmentInConversation(
     recipientHandle: string,
     input: AgentAttachmentInput,
     conversationId: string,
   ): Promise<string> {
     return this.sendAttachmentEnvelope(recipientHandle, input, conversationId);
+  }
+
+  async sendAttachmentFileInConversation(
+    recipientHandle: string,
+    input: AgentAttachmentFileInput,
+    conversationId: string,
+  ): Promise<string> {
+    return this.sendAttachmentInConversation(recipientHandle, await attachmentInputFromFile(input), conversationId);
   }
 
   private async activate(): Promise<AgentCredentials> {
@@ -270,17 +303,39 @@ export class Agent {
         ...(attachmentMessage ? { attachment: {
           descriptor: attachmentMessage.attachment,
           download: () => this.downloadAttachment(attachmentMessage.attachment),
+          downloadTo: (filePath) => this.downloadAttachmentToFile(attachmentMessage.attachment, filePath),
         } } : {}),
         sender,
         receivedAt: new Date(frame.envelope.timestamp),
         isSupervisor,
         reply: (replyText) => this.sendEnvelope(sender.handle, replyText, frame.envelope.conversation_id),
         replyAttachment: (input) => this.sendAttachmentEnvelope(sender.handle, input, frame.envelope.conversation_id),
+        replyAttachmentFile: async (input) => this.sendAttachmentEnvelope(
+          sender.handle,
+          await attachmentInputFromFile(input),
+          frame.envelope.conversation_id,
+        ),
         relay: async (relayText) => {
           if (!isSupervisor) throw new Error("Only supervisor messages can be relayed");
           const counterparty = this.counterparties.get(frame.envelope.conversation_id);
           if (!counterparty) throw new Error("No active counterparty exists for this supervised conversation");
           return this.sendEnvelope(counterparty.handle, relayText, frame.envelope.conversation_id);
+        },
+        relayAttachment: async (input) => {
+          if (!isSupervisor) throw new Error("Only supervisor messages can be relayed");
+          const counterparty = this.counterparties.get(frame.envelope.conversation_id);
+          if (!counterparty) throw new Error("No active counterparty exists for this supervised conversation");
+          return this.sendAttachmentEnvelope(counterparty.handle, input, frame.envelope.conversation_id);
+        },
+        relayAttachmentFile: async (input) => {
+          if (!isSupervisor) throw new Error("Only supervisor messages can be relayed");
+          const counterparty = this.counterparties.get(frame.envelope.conversation_id);
+          if (!counterparty) throw new Error("No active counterparty exists for this supervised conversation");
+          return this.sendAttachmentEnvelope(
+            counterparty.handle,
+            await attachmentInputFromFile(input),
+            frame.envelope.conversation_id,
+          );
         },
         markRead: async () => this.sendFrame({ kind: "ACK", messageId: frame.envelope.message_id, state: "READ" }),
       });
@@ -390,6 +445,13 @@ export class Agent {
     return decryptAttachment(joinEncryptedAttachmentParts(parts, descriptor), descriptor);
   }
 
+  private async downloadAttachmentToFile(descriptor: AttachmentDescriptor, filePath: string): Promise<string> {
+    const target = resolve(filePath);
+    await mkdir(dirname(target), { recursive: true });
+    await writeFile(target, await this.downloadAttachment(descriptor), { mode: 0o600 });
+    return target;
+  }
+
   private async mirrorActivity(
     direction: "INCOMING" | "OUTGOING",
     counterparty: PublicPeer,
@@ -463,6 +525,27 @@ export class Agent {
 
 function exactArrayBuffer(bytes: Uint8Array): ArrayBuffer {
   return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+}
+
+async function attachmentInputFromFile(input: AgentAttachmentFileInput): Promise<AgentAttachmentInput> {
+  const path = resolve(input.path);
+  return {
+    data: new Uint8Array(await readFile(path)),
+    name: input.name?.trim() || basename(path),
+    mimeType: input.mimeType?.trim() || mimeTypeFromPath(path),
+    ...(input.caption?.trim() ? { caption: input.caption.trim() } : {}),
+  };
+}
+
+function mimeTypeFromPath(path: string): string {
+  const mimeTypes: Record<string, string> = {
+    ".aac": "audio/aac", ".csv": "text/csv", ".gif": "image/gif", ".heic": "image/heic",
+    ".jpeg": "image/jpeg", ".jpg": "image/jpeg", ".json": "application/json", ".m4a": "audio/mp4",
+    ".mov": "video/quicktime", ".mp3": "audio/mpeg", ".mp4": "video/mp4", ".ogg": "audio/ogg",
+    ".pdf": "application/pdf", ".png": "image/png", ".txt": "text/plain", ".wav": "audio/wav",
+    ".webm": "video/webm", ".webp": "image/webp", ".zip": "application/zip",
+  };
+  return mimeTypes[extname(path).toLowerCase()] ?? "application/octet-stream";
 }
 
 async function responseError(response: Response): Promise<Error> {

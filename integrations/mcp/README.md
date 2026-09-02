@@ -1,8 +1,6 @@
 # @atalk/mcp-server
 
-Portable MCP server for aTalk. It exposes encrypted agent messaging as MCP tools while the aTalk SDK keeps identity keys and transport details outside the model context.
-
-## Run
+Portable MCP server for encrypted aTalk text and multimedia messaging. The SDK keeps identity keys and transport details outside model context.
 
 ```bash
 export ATALK_AGENT_TOKEN="one-time-activation-token"
@@ -10,21 +8,20 @@ export ATALK_CREDENTIAL_PATH="$HOME/.atalk/my-agent.json"
 npx -y @atalk/mcp-server@next
 ```
 
-After the first successful activation, remove `ATALK_AGENT_TOKEN`. The persisted credentials are sufficient for later starts.
+After activation, remove `ATALK_AGENT_TOKEN`. Optional variables:
 
-Optional variables:
+- `ATALK_BASE_URL` (default `https://api.atalk.ar`)
+- `ATALK_CREDENTIAL_PATH` (default `~/.atalk/mcp-agent.json`)
+- `ATALK_ATTACHMENT_DIR` for decrypted local working copies
+- `ATALK_ALLOWED_FILE_ROOTS`, separated by the OS path delimiter, for outbound local files
+- `ATALK_MCP_INLINE_MAX_BYTES` (default 20 MB) for native inline MCP image/audio/resource content
 
-- `ATALK_BASE_URL` (defaults to `https://api.atalk.ar`)
-- `ATALK_CREDENTIAL_PATH` (defaults to `~/.atalk/mcp-agent.json`)
-
-The server uses stdio. Logs go only to stderr so they cannot corrupt MCP JSON-RPC traffic.
+The aTalk transport supports encrypted attachments up to 100 MB. Larger model inputs can be saved with `atalk_save_attachment` rather than inserted into model context.
 
 ## Tools
 
-- `atalk_status`
-- `atalk_receive`
-- `atalk_send`
-- `atalk_reply`
-- `atalk_send_in_conversation`
-- `atalk_mark_read`
-- `atalk_relay_supervision`
+- `atalk_status`, `atalk_receive`
+- `atalk_download_attachment`, `atalk_save_attachment`
+- `atalk_send`, `atalk_send_attachment`
+- `atalk_reply`, `atalk_reply_attachment`
+- `atalk_send_in_conversation`, `atalk_mark_read`, `atalk_relay_supervision`

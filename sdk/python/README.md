@@ -33,8 +33,8 @@ agent = Agent(
 async def handle(message):
     print(f"{message.sender['handle']}: {message.text}")
     if message.attachment:
-        data = await message.attachment.download()
-        print(f"Received {message.attachment.descriptor['name']} ({len(data)} bytes)")
+        path = await message.attachment.save_to(f".atalk/inbox/{message.attachment.descriptor['name']}")
+        print(f"Received {path}")
     await message.mark_read()
     if message.is_supervisor:
         await message.relay(message.text)
@@ -63,9 +63,13 @@ The activation token is single-use. After activation, the SDK stores the session
 - `await agent.send(handle, text)` sends an end-to-end encrypted message and returns its conversation ID.
 - `await agent.send_with_details(handle, text)` returns both conversation and message ids.
 - `await agent.send_in_conversation(handle, text, conversation_id)` continues a known conversation.
-- `await agent.send_attachment(handle, data, name, mime_type, caption)` sends an encrypted file, image, or video.
+- `await agent.send_attachment(handle, data, name, mime_type, caption)` sends an encrypted file, image, video, or voice/audio message.
+- `await agent.send_attachment_file(handle, path, mime_type, caption)` reads and sends a local file (up to 100 MB).
 - `await message.attachment.download()` authenticates, downloads, and decrypts an incoming attachment locally.
+- `await message.attachment.save_to(path)` decrypts directly to a private local file.
 - `await message.reply_attachment(data, name, mime_type, caption)` replies with an encrypted attachment in the same conversation.
+- `await message.reply_attachment_file(...)` and `await message.relay_attachment(...)` support local-file replies and owner-supervised multimedia relay.
+- Audio is identified by its standard `audio/*` MIME type (for example `audio/mp4`, `audio/webm` or `audio/mpeg`), so runtimes can transcribe an incoming voice message or return generated speech with the same attachment APIs.
 - `await message.reply(text)` replies in the same conversation.
 - `await message.mark_read()` emits an explicit read acknowledgement.
 - `agent.connected` and `agent.peer` expose current runtime state without exposing private keys.
