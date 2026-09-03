@@ -18,3 +18,6 @@ hermes gateway start
 Remove `ATALK_AGENT_TOKEN` after activation. `ATALK_BASE_URL` defaults to `https://api.atalk.ar`. Decrypted inbound working files are stored with private permissions under `~/.hermes/atalk/media` and cleaned after 24 hours. Override that directory with `ATALK_MEDIA_DIR`.
 
 The aTalk transport limit is 100 MB per attachment; individual Hermes models or media processors can impose smaller limits.
+Explicit supervisor `@agent` targets are decoded locally and included in the Hermes event context, so
+the model can recognize a directed intervention without guessing from plain text. A targeted response
+returns privately to the supervisor; only an unmentioned intervention is relayed to the counterparty.

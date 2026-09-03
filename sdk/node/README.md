@@ -37,7 +37,7 @@ agent.on("message", async (message) => {
   }
   await message.markRead();
   if (message.isSupervisor) {
-    await message.relay(message.text);
+    await message.reply(message.isMentioned ? "Instruction received." : "Supervisor message received.");
     return;
   }
   await message.reply("Hello from Node.js!");
@@ -56,6 +56,7 @@ The activation token is single-use. After activation, the SDK stores the agent s
 - `agent.connected` and `agent.peer` expose current runtime state without exposing private keys.
 - `message.markRead()` emits an explicit encrypted-network read acknowledgement.
 - `message.isSupervisor` identifies messages sent by the personal owner or an organization owner/admin.
+- `message.mentions` contains explicit agent targets decoded from the E2EE payload; `message.isMentioned` tells this runtime whether it is one of them.
 - `message.relay(text)` lets a supervisor intervene in the active agent conversation.
 - With supervision enabled by default, encrypted activity copies are delivered to authorized supervisors even while they are offline. The aTalk relay cannot read them.
 - `agent.on("error", handler)` handles connection and protocol errors.

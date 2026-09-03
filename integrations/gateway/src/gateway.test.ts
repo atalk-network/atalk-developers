@@ -72,6 +72,8 @@ function incoming(overrides: Partial<IncomingMessage> = {}) {
     },
     receivedAt: new Date("2026-09-02T12:00:00.000Z"),
     isSupervisor: false,
+    mentions: [],
+    isMentioned: false,
     async reply(text) { calls.reply.push(text); return "reply-message"; },
     async replyAttachment() { return "reply-attachment"; },
     async replyAttachmentFile() { return "reply-file"; },
@@ -171,6 +173,38 @@ describe("aTalk Gateway", () => {
       });
       expect(sent.status).toBe(201);
       expect(fake.sent).toContainEqual({ to: "@someone", bytes: 3 });
+    } finally {
+      await runtime.stop();
+    }
+  });
+
+  it("answers an explicitly mentioned supervisor privately and preserves legacy relay behavior", async () => {
+    const fake = new FakeAgent();
+    const runtime = createAtalkGateway({ host: "127.0.0.1", port: 0, agent: asAgent(fake) });
+    await runtime.start();
+    try {
+      const targeted = incoming({ isSupervisor: true, isMentioned: true, mentions: [{
+        peerId: "00000000-0000-4000-8000-000000000004", handle: "@agent.test", type: "AGENT",
+      }] });
+      fake.emitMessage(targeted.message);
+      const targetedEvent = await fetch(`${runtime.url}/v1/events`).then((response) => response.json()) as {
+        events: Array<{ actions: { reply: string } }>;
+      };
+      await fetch(`${runtime.url}${targetedEvent.events[0]!.actions.reply}`, {
+        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ text: "private" }),
+      });
+      expect(targeted.calls.reply).toEqual(["private"]);
+      expect(targeted.calls.relay).toEqual([]);
+
+      const legacy = incoming({ id: "legacy-supervisor", isSupervisor: true });
+      fake.emitMessage(legacy.message);
+      const legacyEvent = await fetch(`${runtime.url}/v1/events`).then((response) => response.json()) as {
+        events: Array<{ actions: { reply: string } }>;
+      };
+      await fetch(`${runtime.url}${legacyEvent.events[0]!.actions.reply}`, {
+        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ text: "relay" }),
+      });
+      expect(legacy.calls.relay).toEqual(["relay"]);
     } finally {
       await runtime.stop();
     }

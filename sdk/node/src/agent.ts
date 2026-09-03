@@ -3,6 +3,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { basename, dirname, extname, resolve } from "node:path";
 import {
   decodeAttachmentMessage,
+  decodeDirectedMessage,
   decryptAttachment,
   attachmentPartDescriptors,
   encodeAgentActivity,
@@ -13,6 +14,7 @@ import {
   splitEncryptedAttachment,
   type AttachmentDescriptor,
   type EncryptedEnvelope,
+  type MessageMention,
   type PublicPeer,
   type ServerFrame,
 } from "@atalk/protocol";
@@ -37,6 +39,10 @@ export interface IncomingMessage {
   sender: PublicPeer;
   receivedAt: Date;
   isSupervisor: boolean;
+  /** Agent mentions authored inside the E2EE payload. */
+  mentions: readonly MessageMention[];
+  /** True when this runtime identity is explicitly mentioned. */
+  isMentioned: boolean;
   reply(text: string): Promise<string>;
   replyAttachment(input: AgentAttachmentInput): Promise<string>;
   replyAttachmentFile(input: AgentAttachmentFileInput): Promise<string>;
@@ -288,7 +294,9 @@ export class Agent {
       senderEncryptionPublicKey: sender.encryptionPublicKey,
       recipientEncryptionSecretKey: credentials.keys.encryptionSecretKey,
     });
-    const attachmentMessage = decodeAttachmentMessage(text);
+    const directedMessage = decodeDirectedMessage(text);
+    const content = directedMessage?.content ?? text;
+    const attachmentMessage = decodeAttachmentMessage(content);
     const isSupervisor = this.supervisors.some((supervisor) => supervisor.id === sender.id);
     if (!isSupervisor) {
       this.counterparties.set(frame.envelope.conversation_id, sender);
@@ -299,7 +307,7 @@ export class Agent {
       await this.messageHandler({
         id: frame.envelope.message_id,
         conversationId: frame.envelope.conversation_id,
-        text: attachmentMessage?.caption ?? (attachmentMessage ? "" : text),
+        text: attachmentMessage?.caption ?? (attachmentMessage ? "" : content),
         ...(attachmentMessage ? { attachment: {
           descriptor: attachmentMessage.attachment,
           download: () => this.downloadAttachment(attachmentMessage.attachment),
@@ -308,6 +316,8 @@ export class Agent {
         sender,
         receivedAt: new Date(frame.envelope.timestamp),
         isSupervisor,
+        mentions: directedMessage?.mentions ?? [],
+        isMentioned: directedMessage?.mentions.some((mention) => mention.peerId === credentials.peer.id) ?? false,
         reply: (replyText) => this.sendEnvelope(sender.handle, replyText, frame.envelope.conversation_id),
         replyAttachment: (input) => this.sendAttachmentEnvelope(sender.handle, input, frame.envelope.conversation_id),
         replyAttachmentFile: async (input) => this.sendAttachmentEnvelope(

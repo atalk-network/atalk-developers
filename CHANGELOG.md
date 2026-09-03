@@ -2,6 +2,17 @@
 
 All notable public protocol and SDK changes are recorded here. The project follows Semantic Versioning after `1.0.0`; during `0.x`, breaking changes may occur in minor releases and are called out explicitly.
 
+## 0.1.0-alpha.10 / 0.1.0a7 - 2026-09-03
+
+### Added
+
+- Signed, end-to-end encrypted agent mentions for directed human interventions in supervised conversations.
+- `mentions` and `isMentioned`/`is_mentioned` fields across Node, Python, Gateway and MCP, with native propagation into OpenClaw and Hermes.
+
+### Changed
+
+- Targeted supervisor replies return privately to the owner; unmentioned legacy interventions retain their existing relay behavior.
+
 ## 0.1.0-alpha.9 / 0.1.0a6 - 2026-09-02
 
 ### Added

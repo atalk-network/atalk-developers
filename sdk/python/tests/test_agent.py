@@ -96,13 +96,21 @@ async def test_sends_and_mirrors_activity_then_accepts_supervisor_intervention()
         sender_peer_id=supervisor["id"],
         recipient_peer_id=agent_peer["id"],
         timestamp="2026-08-29T12:00:00.000Z",
-        plaintext="Please intervene",
+        plaintext="__ATALK_DIRECTED_MESSAGE_V1__" + json.dumps({
+            "version": 1,
+            "kind": "DIRECTED_MESSAGE",
+            "content": "Please intervene",
+            "mentions": [{"peerId": agent_peer["id"], "handle": agent_peer["handle"], "type": "AGENT"}],
+        }),
         sender_signing_secret_key=supervisor_keys.signing_secret_key,
         sender_encryption_secret_key=supervisor_keys.encryption_secret_key,
         recipient_encryption_public_key=agent_keys.encryption_public_key,
     )
     await runtime._handle_frame({"kind": "MESSAGE", "envelope": intervention})
     assert len(seen) == 1
+    assert seen[0].text == "Please intervene"
+    assert seen[0].is_mentioned is True
+    assert seen[0].mentions == [{"peerId": agent_peer["id"], "handle": agent_peer["handle"], "type": "AGENT"}]
     assert any(
         frame == {"kind": "ACK", "messageId": intervention["message_id"], "state": "READ"}
         for frame in runtime._socket.frames

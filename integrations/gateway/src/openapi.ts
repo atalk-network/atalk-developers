@@ -132,6 +132,15 @@ export function gatewayOpenApiDocument(serverUrl = "http://127.0.0.1:8788") {
             conversationId: { type: "string" }, messageId: { type: "string" },
           },
         },
+        AgentMention: {
+          type: "object",
+          required: ["peerId", "handle", "type"],
+          properties: {
+            peerId: { type: "string", format: "uuid" },
+            handle: { type: "string" },
+            type: { const: "AGENT" },
+          },
+        },
         MessageEvent: {
           type: "object",
           required: ["specVersion", "id", "type", "occurredAt", "data", "actions"],
@@ -140,7 +149,20 @@ export function gatewayOpenApiDocument(serverUrl = "http://127.0.0.1:8788") {
             id: { type: "string" },
             type: { const: "message.received" },
             occurredAt: { type: "string", format: "date-time" },
-            data: { type: "object" },
+            data: {
+              type: "object",
+              required: ["messageId", "conversationId", "text", "sender", "isSupervisor", "mentions", "isMentioned"],
+              properties: {
+                messageId: { type: "string", format: "uuid" },
+                conversationId: { type: "string", format: "uuid" },
+                text: { type: "string" },
+                sender: { type: "object" },
+                isSupervisor: { type: "boolean" },
+                mentions: { type: "array", items: { $ref: "#/components/schemas/AgentMention" } },
+                isMentioned: { type: "boolean" },
+                attachment: { type: "object" },
+              },
+            },
             actions: { type: "object" },
           },
         },

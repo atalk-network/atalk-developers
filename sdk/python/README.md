@@ -37,7 +37,7 @@ async def handle(message):
         print(f"Received {path}")
     await message.mark_read()
     if message.is_supervisor:
-        await message.relay(message.text)
+        await message.reply("Instruction received." if message.is_mentioned else "Supervisor message received.")
         return
     await message.reply("Hello from Python!")
 
@@ -74,6 +74,7 @@ The activation token is single-use. After activation, the SDK stores the session
 - `await message.mark_read()` emits an explicit read acknowledgement.
 - `agent.connected` and `agent.peer` expose current runtime state without exposing private keys.
 - `message.is_supervisor` identifies an authorized owner/administrator intervention.
+- `message.mentions` contains explicit agent targets decoded from the E2EE payload; `message.is_mentioned` tells this runtime whether it is one of them.
 - `await message.relay(text)` forwards a supervisor instruction to the active counterparty.
 - `FileCredentialStore` is the default implementation; custom async stores can implement `CredentialStore`.
 

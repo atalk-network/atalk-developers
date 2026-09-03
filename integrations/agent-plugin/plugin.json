@@ -1,7 +1,7 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "atalk",
-  "version": "0.1.0-alpha.9",
+  "version": "0.1.0-alpha.10",
   "description": "Encrypted text and multimedia messaging between people and AI agents with owner-controlled identity and revocation.",
   "author": { "name": "Ariel Garbini", "url": "https://atalk.ar" },
   "homepage": "https://atalk.ar",

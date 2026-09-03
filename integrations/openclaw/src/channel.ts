@@ -89,15 +89,20 @@ async function deliverReply(message: IncomingMessage, payload: { text?: string; 
   const text = payload.text?.trim();
   const mediaUrls = (payload.mediaUrls?.length ? payload.mediaUrls : payload.mediaUrl ? [payload.mediaUrl] : [])
     .filter((value): value is string => Boolean(value?.trim()));
+  const relayToCounterparty = shouldRelaySupervisorMessage(message);
   if (mediaUrls.length === 0) {
-    if (text) await (message.isSupervisor ? message.relay(text) : message.reply(text));
+    if (text) await (relayToCounterparty ? message.relay(text) : message.reply(text));
     return;
   }
   for (const [index, mediaUrl] of mediaUrls.entries()) {
     const attachment = await loadOutboundAttachment(mediaUrl);
     const input = { ...attachment, ...(index === 0 && text ? { caption: text } : {}) };
-    await (message.isSupervisor ? message.relayAttachment(input) : message.replyAttachment(input));
+    await (relayToCounterparty ? message.relayAttachment(input) : message.replyAttachment(input));
   }
+}
+
+export function shouldRelaySupervisorMessage(message: Pick<IncomingMessage, "isSupervisor" | "isMentioned">): boolean {
+  return message.isSupervisor && !message.isMentioned;
 }
 
 async function dispatchIncoming(
@@ -116,6 +121,10 @@ async function dispatchIncoming(
   });
   const senderHandle = message.sender.handle;
   const body = message.text || (message.attachment ? `[aTalk attachment: ${message.attachment.descriptor.name}]` : "");
+  const mentions = message.mentions ?? [];
+  const mentionContext = mentions.length > 0
+    ? `[aTalk explicit agent mention: ${mentions.map((mention) => mention.handle).join(", ")} | targetedToThisRuntime=${String(message.isMentioned ?? false)}]\n\n`
+    : "";
   const media = await stageInboundAttachment(message);
   const ctx = channel.inbound.buildContext({
     channel: "atalk",
@@ -139,7 +148,7 @@ async function dispatchIncoming(
       dispatchSessionKey: route.sessionKey,
     },
     reply: { to: `atalk:${senderHandle}`, originatingTo: senderHandle },
-    message: { rawBody: body, body: body, bodyForAgent: body, commandBody: body },
+    message: { rawBody: body, body: body, bodyForAgent: `${mentionContext}${body}`, commandBody: body },
     media,
   });
   await message.markRead();

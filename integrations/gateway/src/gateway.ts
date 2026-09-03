@@ -142,12 +142,12 @@ function messageOrThrow(inbox: GatewayInbox, id: string): IncomingMessage {
 }
 
 function replyText(message: IncomingMessage, text: string): Promise<string> {
-  return message.isSupervisor ? message.relay(text) : message.reply(text);
+  return message.isSupervisor && !message.isMentioned ? message.relay(text) : message.reply(text);
 }
 
 function replyAttachment(message: IncomingMessage, data: Uint8Array, name: string, mimeType: string, caption?: string): Promise<string> {
   const input = { data, name, mimeType, ...(caption ? { caption } : {}) };
-  return message.isSupervisor ? message.relayAttachment(input) : message.replyAttachment(input);
+  return message.isSupervisor && !message.isMentioned ? message.relayAttachment(input) : message.replyAttachment(input);
 }
 
 class HttpError extends Error {
@@ -294,7 +294,7 @@ class GatewayRuntime implements AtalkGatewayRuntime {
       sendJson(response, 200, {
         spec: GATEWAY_SPEC,
         delivery: ["long-polling", ...(this.webhookUrl ? ["webhook"] : [])],
-        capabilities: ["text", "image", "video", "audio", "file", "read-receipts", "supervision"],
+        capabilities: ["text", "image", "video", "audio", "file", "read-receipts", "supervision", "directed-mentions"],
         limits: { attachmentBytes: MAX_ATTACHMENT_BYTES, textCharacters: 32_000 },
         endpoints: {
           health: "/health",

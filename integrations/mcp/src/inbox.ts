@@ -7,6 +7,8 @@ export interface SerializableMessage {
   sender: IncomingMessage["sender"];
   receivedAt: string;
   isSupervisor: boolean;
+  mentions: IncomingMessage["mentions"];
+  isMentioned: boolean;
   attachment?: { id: string; name: string; mimeType: string; kind: "IMAGE" | "VIDEO" | "FILE"; size: number };
 }
 
@@ -54,6 +56,8 @@ export function serializeMessage(message: IncomingMessage): SerializableMessage 
     sender: message.sender,
     receivedAt: message.receivedAt.toISOString(),
     isSupervisor: message.isSupervisor,
+    mentions: message.mentions ?? [],
+    isMentioned: message.isMentioned ?? false,
     ...(descriptor ? { attachment: {
       id: descriptor.id,
       name: descriptor.name,

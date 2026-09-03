@@ -28,6 +28,8 @@ export interface GatewayMessageEvent {
     text: string;
     sender: GatewaySender;
     isSupervisor: boolean;
+    mentions: IncomingMessage["mentions"];
+    isMentioned: boolean;
     attachment?: GatewayAttachment;
   };
   actions: {
@@ -101,6 +103,8 @@ export function serializeGatewayMessage(message: IncomingMessage): GatewayMessag
         displayName: message.sender.displayName,
       },
       isSupervisor: message.isSupervisor,
+      mentions: message.mentions ?? [],
+      isMentioned: message.isMentioned ?? false,
       ...(descriptor ? {
         attachment: {
           id: descriptor.id,

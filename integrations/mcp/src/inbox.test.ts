@@ -11,6 +11,8 @@ describe("MCP inbox serialization", () => {
       sender: { id: "33333333-3333-4333-8333-333333333333", type: "HUMAN", handle: "@sender", displayName: "Sender" },
       receivedAt: new Date(0),
       isSupervisor: false,
+      mentions: [{ peerId: "44444444-4444-4444-8444-444444444444", handle: "@agent", type: "AGENT" }],
+      isMentioned: true,
       attachment: {
         descriptor: {
           id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
@@ -22,7 +24,7 @@ describe("MCP inbox serialization", () => {
           encryption: { algorithm: "XCHACHA20_POLY1305", key: "secret-key", nonce: "secret-nonce" },
         },
       },
-    } as unknown as IncomingMessage;
+    } as IncomingMessage;
 
     const serialized = serializeMessage(message);
     expect(serialized.attachment).toEqual({
@@ -34,5 +36,7 @@ describe("MCP inbox serialization", () => {
     });
     expect(JSON.stringify(serialized)).not.toContain("secret-key");
     expect(JSON.stringify(serialized)).not.toContain("secret-nonce");
+    expect(serialized.mentions).toEqual([{ peerId: "44444444-4444-4444-8444-444444444444", handle: "@agent", type: "AGENT" }]);
+    expect(serialized.isMentioned).toBe(true);
   });
 });

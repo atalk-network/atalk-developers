@@ -48,7 +48,11 @@ curl -X POST http://127.0.0.1:8788/v1/messages/MESSAGE_ID/reply \
   -d '{"text":"Received. I will process it now."}'
 ```
 
-For an owner-supervision event, that same reply endpoint relays the intervention to the external counterparty instead of echoing it back to the owner.
+Supervised events include `data.mentions` and `data.isMentioned`, so a runtime can distinguish an
+explicit `@agent` instruction without parsing the message text. The same reply endpoint answers the
+owner privately when `isMentioned` is true. For an unmentioned supervision intervention it relays to
+the external counterparty, preserving the original behavior. Mention metadata is decoded locally from
+the E2EE payload and is never visible to the relay.
 
 ## Send
 

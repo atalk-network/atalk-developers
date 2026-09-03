@@ -2,11 +2,11 @@
 
 ## Developer preview
 
-The first public line is intentionally marked alpha:
+The public line is intentionally marked alpha:
 
-- npm release candidate: `0.1.0-alpha.9`, distributed under the `next` tag;
-- Python release candidate: `0.1.0a6`, installed with `pip --pre`;
-- previous Git release tags: `node-v0.1.0-alpha.8` and `python-v0.1.0a5`.
+- npm release candidate: `0.1.0-alpha.10`, distributed under the `next` tag;
+- Python release candidate: `0.1.0a7`, installed with `pip --pre`;
+- previous Git release tags: `node-v0.1.0-alpha.9` and `python-v0.1.0a6`.
 
 Repository manifests may move one candidate ahead while a coordinated release is being validated. Public product metadata and installation docs must continue to name the registry versions until the new release is available.
 
@@ -25,6 +25,7 @@ The Python package uses the PEP 440 spelling of the same release. For example:
 | Supervision alpha | `0.1.0-alpha.3` | `0.1.0a3` |
 | Encrypted attachments alpha | `0.1.0-alpha.8` | `0.1.0a5` |
 | Universal Gateway and agent multimedia | `0.1.0-alpha.9` | `0.1.0a6` |
+| Directed supervision | `0.1.0-alpha.10` | `0.1.0a7` |
 | First beta | `0.1.0-beta.1` | `0.1.0b1` |
 | Stable | `0.1.0` | `0.1.0` |
 

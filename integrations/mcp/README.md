@@ -17,6 +17,8 @@ After activation, remove `ATALK_AGENT_TOKEN`. Optional variables:
 - `ATALK_MCP_INLINE_MAX_BYTES` (default 20 MB) for native inline MCP image/audio/resource content
 
 The aTalk transport supports encrypted attachments up to 100 MB. Larger model inputs can be saved with `atalk_save_attachment` rather than inserted into model context.
+`atalk_receive` returns structured `mentions` and `isMentioned` fields for explicit supervisor targets;
+the visible `text` remains clean and does not need to be parsed for `@handles`.
 
 ## Tools
 

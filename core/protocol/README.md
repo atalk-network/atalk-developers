@@ -15,6 +15,7 @@ The package exports:
 - canonical JSON encoding and signature verification;
 - TweetNaCl-based encryption helpers;
 - authenticated attachment encryption, metadata envelopes and opaque chunking up to 100 MB;
+- signed directed-message metadata for encrypted supervisor `@mentions`;
 - permission evaluation shared with the Rust golden vectors.
 
 Applications normally install `@atalk/sdk` instead. Use this lower-level package when building another SDK, transport adapter or protocol conformance test.

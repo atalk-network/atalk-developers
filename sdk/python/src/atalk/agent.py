@@ -30,6 +30,7 @@ from .protocol import (
 )
 
 _ACTIVITY_PREFIX = "__ATALK_AGENT_ACTIVITY_V1__"
+_DIRECTED_MESSAGE_PREFIX = "__ATALK_DIRECTED_MESSAGE_V1__"
 _FATAL_SESSION_CODES = {"AUTH_REQUIRED", "INVALID_SESSION", "PEER_INACTIVE"}
 
 
@@ -109,6 +110,8 @@ class Message:
     sender: dict[str, Any]
     received_at: datetime
     is_supervisor: bool
+    mentions: list[dict[str, str]]
+    is_mentioned: bool
     attachment: Attachment | None
     _reply: Callable[[str], Awaitable[str]]
     _reply_attachment: Callable[[bytes, str, str, str | None], Awaitable[str]]
@@ -419,7 +422,10 @@ class Agent:
             sender_encryption_public_key=sender["encryptionPublicKey"],
             recipient_encryption_secret_key=credentials.keys.encryption_secret_key,
         )
-        attachment_message = decode_attachment_message(text)
+        directed_message = _decode_directed_message(text)
+        content = str(directed_message["content"]) if directed_message else text
+        mentions = list(directed_message["mentions"]) if directed_message else []
+        attachment_message = decode_attachment_message(content)
         is_supervisor = any(supervisor["id"] == sender["id"] for supervisor in self._supervisors)
         if not is_supervisor:
             self._counterparties[envelope["conversation_id"]] = sender
@@ -460,10 +466,12 @@ class Agent:
             result = self._handler(Message(
                 id=envelope["message_id"],
                 conversation_id=envelope["conversation_id"],
-                text=str(attachment_message.get("caption", "")) if attachment_message else text,
+                text=str(attachment_message.get("caption", "")) if attachment_message else content,
                 sender=sender,
                 received_at=_parse_timestamp(envelope["timestamp"]),
                 is_supervisor=is_supervisor,
+                mentions=mentions,
+                is_mentioned=any(mention["peerId"] == credentials.peer["id"] for mention in mentions),
                 attachment=Attachment(
                     descriptor=attachment_message["attachment"],
                     _download=lambda: self._download_attachment(attachment_message["attachment"]),
@@ -651,6 +659,36 @@ class Agent:
                 await result
             return
         asyncio.get_running_loop().call_exception_handler({"message": "Unhandled aTalk agent error", "exception": error})
+
+
+def _decode_directed_message(value: str) -> dict[str, Any] | None:
+    if not value.startswith(_DIRECTED_MESSAGE_PREFIX):
+        return None
+    try:
+        payload = json.loads(value[len(_DIRECTED_MESSAGE_PREFIX):])
+        if (
+            not isinstance(payload, dict)
+            or payload.get("version") != 1
+            or payload.get("kind") != "DIRECTED_MESSAGE"
+            or not isinstance(payload.get("content"), str)
+            or not isinstance(payload.get("mentions"), list)
+            or not 1 <= len(payload["mentions"]) <= 32
+        ):
+            return None
+        mentions: list[dict[str, str]] = []
+        for mention in payload["mentions"]:
+            if (
+                not isinstance(mention, dict)
+                or mention.get("type") != "AGENT"
+                or not isinstance(mention.get("peerId"), str)
+                or not isinstance(mention.get("handle"), str)
+            ):
+                return None
+            uuid.UUID(mention["peerId"])
+            mentions.append({"peerId": mention["peerId"], "handle": mention["handle"], "type": "AGENT"})
+        return {"content": payload["content"], "mentions": mentions}
+    except (ValueError, TypeError, json.JSONDecodeError):
+        return None
 
 
 def _utc_now() -> str:

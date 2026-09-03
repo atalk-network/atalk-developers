@@ -21,3 +21,6 @@ After activation, remove `ATALK_AGENT_TOKEN` and keep the credential path. `ATAL
 Attachments are decrypted only inside the connector process and staged in OpenClaw's managed inbound media store. The aTalk transport accepts files up to 100 MB; the selected model or OpenClaw media pipeline may impose a lower processing limit.
 
 Identity policy, temporary authorizations, supervision and revocation remain in the aTalk app.
+When an owner intervenes in a supervised conversation, the selected `@agent` arrives as signed,
+encrypted mention metadata and is added to OpenClaw's agent-facing context. OpenClaw replies privately
+to that owner; an unmentioned intervention continues to the external counterparty. The user-visible text stays unchanged.

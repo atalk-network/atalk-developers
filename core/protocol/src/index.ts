@@ -1,6 +1,7 @@
 export * from "./agent-activity.js";
 export * from "./attachments.js";
 export * from "./crypto.js";
+export * from "./directed-message.js";
 export * from "./encoding.js";
 export * from "./permissions.js";
 export * from "./schema.js";

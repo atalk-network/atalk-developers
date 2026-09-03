@@ -77,7 +77,8 @@ class AtalkAdapter(BasePlatformAdapter):
         handle = self._handle(chat_id)
         incoming = self._latest_by_chat.get(handle)
         if incoming:
-            message_id = await (incoming.relay(content) if incoming.is_supervisor else incoming.reply(content))
+            relay_to_counterparty = incoming.is_supervisor and not bool(getattr(incoming, "is_mentioned", False))
+            message_id = await (incoming.relay(content) if relay_to_counterparty else incoming.reply(content))
         else:
             message_id = (await self._agent.send_with_details(handle, content)).message_id
         return SendResult(success=True, message_id=message_id)
@@ -135,8 +136,14 @@ class AtalkAdapter(BasePlatformAdapter):
             user_id=str(message.sender["id"]),
             user_name=str(message.sender.get("displayName") or handle),
         )
+        mention_context = ""
+        mentions = getattr(message, "mentions", [])
+        if mentions:
+            targets = ", ".join(mention["handle"] for mention in mentions)
+            targeted = bool(getattr(message, "is_mentioned", False))
+            mention_context = f"[aTalk explicit agent mention: {targets} | targeted_to_this_runtime={targeted}]\n\n"
         event = MessageEvent(
-            text=message.text,
+            text=f"{mention_context}{message.text}",
             message_type=message_type,
             user_id=str(message.sender["id"]),
             user_name=str(message.sender.get("displayName") or handle),
@@ -166,9 +173,10 @@ class AtalkAdapter(BasePlatformAdapter):
         data = path.read_bytes()
         name = display_name or path.name
         if incoming:
+            relay_to_counterparty = incoming.is_supervisor and not bool(getattr(incoming, "is_mentioned", False))
             message_id = await (
                 incoming.relay_attachment(data, name, mime_type, caption)
-                if incoming.is_supervisor
+                if relay_to_counterparty
                 else incoming.reply_attachment(data, name, mime_type, caption)
             )
         else:

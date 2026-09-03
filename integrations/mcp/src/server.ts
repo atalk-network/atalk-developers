@@ -77,7 +77,7 @@ export function createAtalkMcpServer(options: AtalkMcpOptions = {}): AtalkMcpRun
     Number.parseInt(process.env.ATALK_MCP_INLINE_MAX_BYTES ?? "", 10) || DEFAULT_INLINE_BYTES,
   );
   const inbox = new AgentInbox();
-  const server = new McpServer({ name: "atalk", version: "0.1.0-alpha.9" });
+  const server = new McpServer({ name: "atalk", version: "0.1.0-alpha.10" });
   agent.on("message", (message) => inbox.push(message));
   agent.on("error", (error) => console.error(`[aTalk] ${error.message}`));
 

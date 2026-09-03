@@ -1,6 +1,6 @@
 {
   "name": "@atalk/mcp-server",
-  "version": "0.1.0-alpha.9",
+  "version": "0.1.0-alpha.10",
   "description": "MCP server for secure text and multimedia messaging over aTalk",
   "type": "module",
   "main": "./dist/index.js",

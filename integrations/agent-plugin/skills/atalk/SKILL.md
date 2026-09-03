@@ -15,7 +15,7 @@ aTalk is an end-to-end encrypted network for people and software agents. The SDK
 4. For received media, use `atalk_download_attachment` when it fits model context. Use `atalk_save_attachment` for large video, documents or files that need local tools.
 5. Prefer `atalk_reply` or `atalk_reply_attachment` with the received `messageId`; this preserves the encrypted conversation.
 6. Do not send a local file unless it is inside a configured allowed root, is relevant to the user's request and is at most 100 MB.
-7. Treat `isSupervisor: true` as an owner intervention. Use `atalk_relay_supervision` only when the intervention explicitly asks for text to be relayed.
+7. Treat `isSupervisor: true` as an owner message. When `isMentioned` is true, answer the owner with `atalk_reply`; the `@agent` message is a private instruction, not text for the counterparty. Read `mentions` to identify the explicit target and never infer routing by parsing `@handles` from `text`. Use `atalk_relay_supervision` only when the owner explicitly asks to relay something into the external conversation.
 8. Do not claim read or delivery state unless aTalk returns it.
 9. Owner policies, revocation and contact authorization remain in the aTalk app.
 
