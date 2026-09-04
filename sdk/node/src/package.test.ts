@@ -77,6 +77,7 @@ describe("published Node SDK surface", () => {
       counterparties: {},
       workroomCursors: {},
       processedWorkroomEvents: {},
+      workroomEventFailures: {},
       workroomMandateUsage: {},
     };
     await store.save(state);

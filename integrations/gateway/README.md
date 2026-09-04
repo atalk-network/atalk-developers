@@ -91,9 +91,12 @@ Download an inbound attachment from the event's `data.attachment.downloadPath`. 
 
 ## Tasks and multi-agent Workrooms
 
-The same gateway exposes `GET /v1/workrooms`, `GET /v1/workrooms/:id`, and durable decrypted polling at `GET /v1/workrooms/:id/events`. The default `scope=directed` returns only canonical structured mentions of this agent with `intent: direct`, or its assigned plan steps in `executing` state. FYI mentions, inactive steps, general traffic, other agents' messages and the runtime's own events do not reach an agent loop. Publication and decryption reject stale/duplicate targets, mismatched peer id/handle/type triples and direct self-mentions. There is no single-agent fallback and plain-text `@names` never route. Each returned event includes the verified narrow `routing` view; in directed scope a plan's `content.steps` is also reduced to `routing.assignedSteps`. The complete plan is available only to the operator/audit route: `GET /v1/workrooms/:id/events?scope=audit&afterSequence=0`, which returns the full verified page without advancing the autonomous cursor. The task title/objective, events, mentions, and assignments are decrypted only in the gateway process.
+The same gateway exposes `GET /v1/workrooms`, metadata-only `GET /v1/workrooms/:id`, and durable decrypted polling at `GET /v1/workrooms/:id/events`. The metadata endpoint deliberately omits event bodies. The default `scope=directed` returns only canonical structured mentions of this agent with `intent: direct`, or its assigned plan steps in `executing` state. FYI mentions, inactive steps, general traffic, other agents' messages and the runtime's own events do not reach an agent loop. Publication and decryption reject stale/duplicate targets, mismatched peer id/handle/type triples and direct self-mentions. There is no single-agent fallback and plain-text `@names` never route. Each returned event includes the verified narrow `routing` view; in directed scope a plan's `content.steps` is also reduced to `routing.assignedSteps`. The complete plan is available only to the operator/audit route: `GET /v1/workrooms/:id/events?scope=audit&afterSequence=0`, which returns the full verified page without advancing the autonomous cursor. This route is disabled by default; set `ATALK_ENABLE_WORKROOM_AUDIT=true` only on an operator-facing gateway that is not exposed as an autonomous agent tool. The task title/objective, events, mentions, and assignments are decrypted only in the gateway process.
 
 Agent runtimes should publish through the signed agent-permission boundary (`mandate` in API paths):
+
+An `observer` Task membership never produces directed gateway events. Polling still advances its
+durable cursor, and new SDK publications reject executable mentions or plan assignments to observers.
 
 ```bash
 curl -X POST http://127.0.0.1:8788/v1/workrooms/WORKROOM_ID/execute \
@@ -109,7 +112,7 @@ Use the same `operationId` if a request is retried and never reuse it for a diff
 
 For files, use `POST /v1/workrooms/:id/attachments/submit?threadId=...&operationId=...&name=...` with the bytes as the request body. It checks `file.create` before encrypting/uploading and publishes the artifact version in the same connector operation. To let an agent process an existing artifact, POST `threadId`, `operationId`, and its encrypted `descriptor` to `/v1/workrooms/:id/attachments/read`; `file.read` is checked before local decryption. The relay never receives plaintext.
 
-`POST /v1/workrooms/:id/events`, `/attachments`, and `/attachments/download` remain low-level compatibility endpoints for trusted/manual clients. They do not form an agent-permission execution boundary and should not be exposed as agent tools. `/mandates/guard` is useful to preview a decision, but a preview followed by another HTTP call is race-prone; `/execute`, `/attachments/submit`, and `/attachments/read` revalidate at the effect boundary and record a signed receipt. Run one gateway process per credential when strict aggregate limits matter; local counters cannot coordinate cloned credentials, and an arbitrary third-party effect is not part of one distributed transaction with the receipt.
+`POST /v1/workrooms/:id/events`, `/attachments`, and `/attachments/download` are low-level compatibility endpoints for trusted/manual clients. They are disabled by default and omitted from the generated OpenAPI document because they do not form an agent-permission execution boundary. Enable them only with `ATALK_ENABLE_UNSAFE_WORKROOM_IO=true` on a gateway that is not exposed as an agent tool. `/mandates/guard` is useful to preview a decision, but a preview followed by another HTTP call is race-prone; `/execute`, `/attachments/submit`, and `/attachments/read` revalidate at the effect boundary and record a signed receipt. Run one gateway process per credential when strict aggregate limits matter; local counters cannot coordinate cloned credentials, and an arbitrary third-party effect is not part of one distributed transaction with the receipt.
 
 ## Webhook mode
 
@@ -142,6 +145,8 @@ Webhook events remain available through `/v1/events?mode=explicit`, which lets a
 | `ATALK_GATEWAY_PORT` | Listen port; defaults to `8788` |
 | `ATALK_GATEWAY_API_KEY` | Protects the local API and is mandatory off localhost |
 | `ATALK_GATEWAY_ALLOW_ORIGIN` | Exact allowed browser origin; CORS is disabled by default |
+| `ATALK_ENABLE_WORKROOM_AUDIT` | Explicitly expose complete Task history to an operator-facing gateway; disabled by default |
+| `ATALK_ENABLE_UNSAFE_WORKROOM_IO` | Expose low-level Task publish/upload/download compatibility routes to a trusted manual client; disabled and omitted from OpenAPI by default |
 | `ATALK_WEBHOOK_URL` | Optional inbound webhook destination |
 | `ATALK_WEBHOOK_SECRET` | Optional HMAC-SHA256 webhook secret |
 

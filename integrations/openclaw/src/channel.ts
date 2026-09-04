@@ -229,7 +229,8 @@ export function renderWorkroomEvent(item: Pick<DecryptedWorkroomEvent, "content"
 export function shouldDispatchWorkroomEvent(
   item: Pick<DecryptedWorkroomEvent, "directedToMe" | "routing">,
 ): boolean {
-  return item.directedToMe === true && item.routing.directedToMe === true;
+  return item.directedToMe === true
+    && item.routing.directedToMe === true;
 }
 
 export function mandateFailureMode(result: { status: string }): "retry" | "stop" | undefined {

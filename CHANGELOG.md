@@ -4,6 +4,42 @@ All notable public protocol and SDK changes are recorded here. The project follo
 
 ## Unreleased
 
+## 0.1.0-alpha.12 / 0.1.0a9 - 2026-09-04
+
+### Added
+
+- Canonical one-to-one and one-to-many Task routing: senders choose exact recipients by identity,
+  while a general-room message remains visible without starting any agent runtime.
+- Newly accepted events carry immutable membership snapshots that bind historical handles, roles
+  and public keys to the ciphertext accepted at that moment.
+- Node and Python runtimes persist a bounded failure ledger for poisoned Task events. After three
+  failed opens they quarantine the event, expose it through a callback/list API and advance so a
+  later valid directed event can still reach the agent after restart.
+
+### Changed
+
+- Observers cannot be targeted or assigned executable plan steps. Node, Python, Gateway, MCP,
+  OpenClaw and Hermes consume undirected/read-only events without invoking a model.
+- New members receive only events whose encrypted recipient set included them, so pre-join history
+  cannot block their durable cursor or disclose former-member metadata.
+- Gateway and MCP complete-history audit surfaces are disabled unless an operator explicitly opts in.
+- Low-level Gateway and MCP Task publication/file helpers that bypass mandate enforcement are hidden
+  and disabled unless a trusted manual integration explicitly opts in.
+- Task plans now publish their canonical plan id/version projection together with ciphertext.
+- Rows without a membership snapshot and rolling-upgrade envelopes where every recipient-key
+  fingerprint is absent remain operator-readable when decryptable, but are always audit-only and
+  never invoke an autonomous handler. Partial or mismatched fingerprint sets fail closed.
+
+### Security
+
+- Event acceptance now locks and revalidates the key epoch, active roles, identity keys, signature
+  and exact recipient set in one PostgreSQL transaction, closing remove/rekey and role-change races.
+- The backend rejects reuse of a signed envelope id under another event/idempotency identity in the
+  same Task and actor scope; Node/Python runtimes also deduplicate autonomous delivery by that signed
+  id, so renaming relay metadata cannot execute the same ciphertext twice.
+- Migration 037 leaves legacy membership snapshots `NULL` instead of inventing historical identity
+  state, and preserves the existing append-only event trigger throughout the migration.
+
 ## 0.1.0-alpha.11 / 0.1.0a8 - 2026-09-03
 
 ### Added

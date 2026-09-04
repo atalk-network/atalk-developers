@@ -19,7 +19,7 @@ aTalk is an end-to-end encrypted network for people and software agents. The SDK
 8. Do not claim read or delivery state unless aTalk returns it.
 9. Owner policies, revocation and contact authorization remain in the aTalk app.
 10. Use `atalk_workrooms` to discover Tasks and `atalk_workroom_receive` to consume directed work durably. It is fail-closed and returns only an authenticated structured mention of this agent or a plan step assigned to it. Never infer a target from visible `@text`, and never use `atalk_workroom_audit` as an autonomous trigger.
-11. Use the permission-aware Task message, activity, plan, deliverable, file-submit and file-read tools. Reuse the returned stable `operationId` when retrying the same operation. Never expose the low-level compatibility upload/save helpers directly to autonomous model work, and never publish cost or approval records as if they were independent agent capabilities.
+11. Use the permission-aware Task message, activity, plan, deliverable, file-submit and file-read tools. Reuse the returned stable `operationId` when retrying the same operation. The low-level compatibility upload/save helpers are absent by default; never enable them on an autonomous model process. Never publish cost or approval records as if they were independent agent capabilities.
 12. `requires_approval` means an encrypted approval request was created and no effect ran; `denied` also means stop. For an external effect that has no permission-aware Task tool, call `atalk_workroom_mandate_guard` with an informed `summary`, `effect`, stable `operationId` and any financial/data impact immediately before acting. A guard result is only a preview, is not atomic with a third-party action and records no execution receipt.
 
 ## First activation

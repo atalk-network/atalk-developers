@@ -18,7 +18,13 @@ export type {
   RefreshedAgentCredentials,
 } from "./credential-store.js";
 export { FileRuntimeStateStore, MemoryRuntimeStateStore } from "./runtime-state-store.js";
-export type { AgentRuntimeState, PendingAgentActivation, RuntimeStateStore, WorkroomMandateUsage } from "./runtime-state-store.js";
+export type {
+  AgentRuntimeState,
+  PendingAgentActivation,
+  RuntimeStateStore,
+  WorkroomEventFailureState,
+  WorkroomMandateUsage,
+} from "./runtime-state-store.js";
 export { RUST_CORE_VERSION } from "./native-core.js";
 export { defaultWorkroomAction, WorkroomClient, workroomStopReason } from "./workrooms.js";
 export type {

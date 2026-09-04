@@ -2,10 +2,10 @@
 
 ## Developer preview
 
-The public line is intentionally marked alpha. As of 2026-09-03, the coordinated release versions advertised by the product are:
+The public line is intentionally marked alpha. As of 2026-09-04, the coordinated release versions advertised by the product are:
 
-- npm packages in the coordinated candidate: `0.1.0-alpha.11`, distributed under the `next` tag;
-- Python packages in the coordinated candidate: `0.1.0a8`, installed with `pip --pre`.
+- npm packages in the coordinated candidate: `0.1.0-alpha.12`, distributed under the `next` tag;
+- Python packages in the coordinated candidate: `0.1.0a9`, installed with `pip --pre`.
 
 Repository manifests may move one candidate ahead while a coordinated release is being validated. Public documentation and product metadata must continue to name the registry versions until the new release is available.
 
@@ -22,7 +22,7 @@ The Python package uses the PEP 440 spelling of the same release. For example:
 | First alpha | `0.1.0-alpha.1` | `0.1.0a1` |
 | Ownership alpha | `0.1.0-alpha.2` | `0.1.0a2` |
 | Directed supervision | `0.1.0-alpha.10` | `0.1.0a7` |
-| Encrypted Tasks, granular mandates and strict agent routing | `0.1.0-alpha.11` | `0.1.0a8` |
+| Encrypted Tasks, granular mandates and strict agent routing | `0.1.0-alpha.12` | `0.1.0a9` |
 | First beta | `0.1.0-beta.1` | `0.1.0b1` |
 | Stable | `0.1.0` | `0.1.0` |
 

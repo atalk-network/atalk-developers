@@ -94,6 +94,10 @@ export interface AtalkMcpOptions {
   credentialPath?: string;
   attachmentDirectory?: string;
   allowedFileRoots?: string[];
+  /** Explicit operator opt-in for the complete non-autonomous Task history. */
+  allowWorkroomAudit?: boolean;
+  /** Explicit trusted/manual opt-in for low-level Task attachment I/O. */
+  allowUnsafeWorkroomIo?: boolean;
   agent?: Agent;
 }
 
@@ -118,6 +122,10 @@ function safeName(name: string): string {
 function isWithin(root: string, path: string): boolean {
   const value = relative(root, path);
   return value === "" || (!value.startsWith(`..${sep}`) && value !== ".." && !isAbsolute(value));
+}
+
+function environmentFlag(value: string | undefined): boolean {
+  return value === "1" || value?.toLowerCase() === "true";
 }
 
 async function resolveAllowedFile(filePath: string, roots: string[]): Promise<{ path: string; name: string }> {
@@ -151,8 +159,12 @@ export function createAtalkMcpServer(options: AtalkMcpOptions = {}): AtalkMcpRun
     MAX_ATTACHMENT_BYTES,
     Number.parseInt(process.env.ATALK_MCP_INLINE_MAX_BYTES ?? "", 10) || DEFAULT_INLINE_BYTES,
   );
+  const allowWorkroomAudit = options.allowWorkroomAudit
+    ?? environmentFlag(process.env.ATALK_ENABLE_WORKROOM_AUDIT);
+  const allowUnsafeWorkroomIo = options.allowUnsafeWorkroomIo
+    ?? environmentFlag(process.env.ATALK_ENABLE_UNSAFE_WORKROOM_IO);
   const inbox = new AgentInbox();
-  const server = new McpServer({ name: "atalk", version: "0.1.0-alpha.11" });
+  const server = new McpServer({ name: "atalk", version: "0.1.0-alpha.12" });
   agent.on("message", (message) => inbox.push(message));
   agent.on("error", (error) => console.error(`[aTalk] ${error.message}`));
 
@@ -194,26 +206,30 @@ export function createAtalkMcpServer(options: AtalkMcpOptions = {}): AtalkMcpRun
     const cursor = await agent.workrooms.poll(workroomId, (event) => {
       // Keep the MCP boundary fail-closed even when a custom Agent instance is
       // injected. The SDK already applies the same structured routing rule.
-      if (event.directedToMe) events.push(workroomEventView(event));
+      if (event.directedToMe && event.routing?.directedToMe === true) {
+        events.push(workroomEventView(event));
+      }
     }, { limit });
     return textResult({ workroomId, cursor, events });
   });
 
-  server.registerTool("atalk_workroom_audit", {
-    description: "Operator-only complete Task event view. Reads general and other-agent traffic without advancing the autonomous handler cursor; do not use it to trigger model work.",
-    inputSchema: z.object({
-      workroomId: z.string().uuid(),
-      afterSequence: z.number().int().nonnegative().default(0),
-      limit: z.number().int().min(1).max(500).default(100),
-    }),
-  }, async ({ workroomId, afterSequence, limit }) => {
-    const page = await agent.workrooms.readAuditEvents(workroomId, afterSequence, limit);
-    return textResult({
-      workroomId,
-      events: page.events.map(workroomEventView),
-      nextAfterSequence: page.nextAfterSequence,
+  if (allowWorkroomAudit) {
+    server.registerTool("atalk_workroom_audit", {
+      description: "Operator-only complete Task event view. Reads general and other-agent traffic without advancing the autonomous handler cursor; do not use it to trigger model work.",
+      inputSchema: z.object({
+        workroomId: z.string().uuid(),
+        afterSequence: z.number().int().nonnegative().default(0),
+        limit: z.number().int().min(1).max(500).default(100),
+      }),
+    }, async ({ workroomId, afterSequence, limit }) => {
+      const page = await agent.workrooms.readAuditEvents(workroomId, afterSequence, limit);
+      return textResult({
+        workroomId,
+        events: page.events.map(workroomEventView),
+        nextAfterSequence: page.nextAfterSequence,
+      });
     });
-  });
+  }
 
   server.registerTool("atalk_workroom_publish", {
     description: "Agent-permission-aware advanced publication of a structured Task message, activity, plan, artifact or deliverable. It stops for approval or denial and records a signed receipt after success.",
@@ -332,19 +348,21 @@ export function createAtalkMcpServer(options: AtalkMcpOptions = {}): AtalkMcpRun
     return textResult({ operationId: stableOperationId, result });
   });
 
-  server.registerTool("atalk_workroom_upload", {
-    description: "Low-level encrypted upload for trusted/manual clients. Agent runtimes should use atalk_workroom_submit_file so the agent permission is enforced and the artifact is published.",
-    inputSchema: z.object({
-      workroomId: z.string().uuid(),
-      filePath: z.string().min(1),
-      mimeType: z.string().min(1).max(160).optional(),
-    }),
-  }, async ({ workroomId, filePath, mimeType }) => {
-    const file = await resolveAllowedFile(filePath, allowedFileRoots);
-    return textResult({ descriptor: await agent.workrooms.uploadAttachmentFile({
-      workroomId, path: file.path, name: file.name, mimeType: mimeType ?? "application/octet-stream",
-    }) });
-  });
+  if (allowUnsafeWorkroomIo) {
+    server.registerTool("atalk_workroom_upload", {
+      description: "Low-level encrypted upload for trusted/manual clients. Agent runtimes should use atalk_workroom_submit_file so the agent permission is enforced and the artifact is published.",
+      inputSchema: z.object({
+        workroomId: z.string().uuid(),
+        filePath: z.string().min(1),
+        mimeType: z.string().min(1).max(160).optional(),
+      }),
+    }, async ({ workroomId, filePath, mimeType }) => {
+      const file = await resolveAllowedFile(filePath, allowedFileRoots);
+      return textResult({ descriptor: await agent.workrooms.uploadAttachmentFile({
+        workroomId, path: file.path, name: file.name, mimeType: mimeType ?? "application/octet-stream",
+      }) });
+    });
+  }
 
   server.registerTool("atalk_workroom_submit_file", {
     description: "Check the agent permission, encrypt, upload and publish one Task file (maximum 100 MB), then record a signed execution receipt.",
@@ -369,20 +387,22 @@ export function createAtalkMcpServer(options: AtalkMcpOptions = {}): AtalkMcpRun
     return textResult({ operationId: stableOperationId, result });
   });
 
-  server.registerTool("atalk_workroom_save_attachment", {
-    description: "Low-level authenticated Task attachment download for trusted/manual clients. Agent runtimes should use atalk_workroom_read_attachment so file.read is permission-checked.",
-    inputSchema: z.object({
-      descriptor: z.record(z.string(), z.unknown()),
-    }),
-  }, async ({ descriptor }) => {
-    const value = descriptor as never;
-    const id = String(descriptor.id ?? "attachment");
-    const name = safeName(String(descriptor.name ?? "attachment"));
-    const path = join(attachmentDirectory, `${id}-${name}`);
-    await mkdir(attachmentDirectory, { recursive: true, mode: 0o700 });
-    await agent.workrooms.downloadAttachmentTo(value, path);
-    return textResult({ path, descriptor });
-  });
+  if (allowUnsafeWorkroomIo) {
+    server.registerTool("atalk_workroom_save_attachment", {
+      description: "Low-level authenticated Task attachment download for trusted/manual clients. Agent runtimes should use atalk_workroom_read_attachment so file.read is permission-checked.",
+      inputSchema: z.object({
+        descriptor: z.record(z.string(), z.unknown()),
+      }),
+    }, async ({ descriptor }) => {
+      const value = descriptor as never;
+      const id = String(descriptor.id ?? "attachment");
+      const name = safeName(String(descriptor.name ?? "attachment"));
+      const path = join(attachmentDirectory, `${id}-${name}`);
+      await mkdir(attachmentDirectory, { recursive: true, mode: 0o700 });
+      await agent.workrooms.downloadAttachmentTo(value, path);
+      return textResult({ path, descriptor });
+    });
+  }
 
   server.registerTool("atalk_workroom_read_attachment", {
     description: "Check the agent permission, authenticate and decrypt a Task attachment into the connector's private directory.",

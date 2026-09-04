@@ -18,11 +18,23 @@ assigns that peer id and is currently `executing`.
 An empty/missing mention list is a general room message and triggers no agent, including in a Task
 that currently has only one agent. Text that happens to contain `@handle` has no routing authority.
 
-Both publication and decryption bind each mention's peer id, canonical handle and peer type to the
-current active membership. Duplicate/stale/forged targets and a direct self-mention are rejected.
+Publication binds each mention's peer id, canonical handle, peer type and executable role to the
+current active membership. Decryption binds the same fields to the immutable membership/identity
+snapshot captured when the server accepted that event; its peer-id set must match the signed wrapped-key
+recipient set. Each new writer also signs `recipientEncryptionKeyHash`, a SHA-512 fingerprint of the exact
+decoded X25519 public-key bytes used for every wrap. The relay rejects a partial set or any mismatch against
+the accepted identity snapshot. This preserves valid history after a member leaves, is suspended, rotates
+keys or changes role without accepting a newly forged/stale target. Duplicate targets and a direct
+self-mention are rejected.
 Events authored by the runtime never route back to that runtime. FYI mentions and
 `waiting_approval`/`blocked`/`completed`/`cancelled`/`expired` steps stay in audit history without
-starting work. Decrypted SDK events expose `routing.directMentions` and only the recipient's
+starting work. An `observer` remains read-only: new executable mentions or assignments to it are
+rejected, it cannot issue a mandate or be its principal/actor, cannot append execution receipts, and mandate guards deny external
+effects even if an older mandate is still valid. The actor, principal and issuer must all remain active,
+non-observer members at execution time; removal or demotion disables the mandate without deleting its
+audit history. Revocation remains available as a safety stop. Legacy
+events advance its cursor without invoking an autonomous handler. Decrypted
+SDK events expose `routing.directMentions` and only the recipient's
 `routing.assignedSteps`. Autonomous `poll`/`watch` handlers receive a plan payload whose `steps` are
 also reduced to that recipient-only executable list; the full plan exists only on the explicit audit
 surface.
@@ -30,11 +42,24 @@ surface.
 Node and Python `poll`/`watch` enforce this rule before invoking a handler while still advancing the
 durable automation cursor over verified undirected traffic. Their explicit `readAuditEvents` /
 `read_audit_events` surfaces expose the complete history without moving that cursor. Gateway and MCP
-mirror this split with a directed default and an explicitly named audit surface. This changes the
-consumer behavior of early alpha SDKs but does not change protocol-v1 bytes: structured encrypted
-`mentions` already existed, and old payloads without them remain readable as non-triggering history.
-The stricter canonical-member validation is fail-closed: an older event whose structured target is no
-longer an active member is not eligible for rendering or autonomous delivery.
+mirror this split with a directed default; their explicitly named audit surface is disabled unless a
+dedicated operator process opts in with `ATALK_ENABLE_WORKROOM_AUDIT=true`. Structured encrypted
+`mentions` remain protocol-v1 compatible, while current writers add the optional signed recipient-key
+fingerprint. For rolling upgrades, an envelope where every wrap omits that fingerprint is accepted as
+legacy and remains readable, but it is always audit-only and cannot invoke an autonomous handler. A mixed
+or mismatched fingerprint set is rejected. Rows predating immutable membership snapshots are likewise
+audit-only; the migration deliberately leaves their snapshot `NULL` instead of inventing historical roles
+or keys from today's directory.
+The event-time role and the recipient's current role must both permit execution: promoting a former
+observer cannot retroactively activate its old events, and demoting a contributor stops current automation.
+
+Automation cursors, retry ledgers and deduplication use the signed envelope `envelopeId`, not the
+relay-assigned outer `eventId`; the backend also prevents one actor from reusing that signed id under a
+renamed event in the same Task. Protocol v1 intentionally permits those two ids to differ (the mobile
+client already generates them independently). Message/activity payloads bind `threadId` inside ciphertext,
+while the remaining structured payload kinds rely on authenticated relay metadata for their thread. A
+future wire revision should bind the outer event identity and thread uniformly without retroactively
+rejecting valid protocol-v1 history.
 
 1. A human creates a workroom with an encrypted objective and optional visible deadline.
 2. Owners or supervisors add identities they control directly. An external person accepts a signed,
@@ -73,7 +98,7 @@ contributors append work; observers are read-only. The initial owner must be an 
 | Relay-visible metadata | Always encrypted |
 | --- | --- |
 | Workroom/thread/event ids | Objective and thread titles |
-| Member peer ids, peer kind and roles | Message and activity body |
+| Member peer ids, peer kind, role, handle and public-key snapshots | Message and activity body |
 | Lifecycle state and deadline | `@mention` targets and intent |
 | Event kind, key epoch, time and ciphertext hash | Plan contents and assignments |
 | Artifact/version/attachment routing ids | Artifact name, description and bytes |
@@ -149,6 +174,14 @@ introduced.
 Every mutation has an actor-scoped idempotency key. Reusing a key with the same payload returns the
 existing record; reusing it for different content fails. SQL serializes mandate revisions and receipt
 appends with transaction advisory locks.
+
+For Task events, the relay also makes the sender-signed `envelopeId` unique per workroom and actor.
+Changing the outer `eventId` or idempotency key therefore cannot replay one signed ciphertext as a
+second autonomous instruction, and runtimes deduplicate handlers by that signed id while retaining
+compatibility with state written by earlier SDKs. Protocol v1 does not require outer `eventId` and
+`envelopeId` to be equal because existing mobile producers chose them independently; directly signing
+all outer event/thread metadata is reserved for a versioned wire evolution rather than retrofitted into
+historical records.
 
 Receipts form one hash chain per workroom. Each includes its own signing-public-key snapshot, payload
 hash, previous receipt hash, outcome and timestamp. Append-only database triggers reject updates or

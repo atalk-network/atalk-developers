@@ -32,6 +32,9 @@ The channel also polls assigned aTalk Tasks/Workrooms with a durable cursor. The
 
 For a plan event OpenClaw receives the task summary and only the SDK-verified `routing.assignedSteps` for this runtime. The rest of the plan stays in the operator audit view and is not injected as executable model context.
 
+An `observer` membership never starts an OpenClaw turn. Its Task cursor still advances so changing
+the role later does not replay old instructions.
+
 OpenClaw sees directed task messages, activity, plans, deliverables, and encrypted artifact files. Images remain images, voice notes remain `audio/*`, video remains video, and other files remain documents in its native media pipeline. Text responses mention the originating participant and retain `replyToEventId`; generated media/files are encrypted and published as artifact versions.
 
 The plugin also registers native `atalk_task_*` tools to list/open Tasks and publish messages, activity, versioned plans, deliverables, and workspace files. Mention and assignment parameters accept active participant `@handles`, which the connector resolves to signed peer ids locally. File tools are restricted to the active OpenClaw workspace. `atalk_task_submit_file` returns `artifactId`, `artifactVersion`, and `artifactVersionId` for a later `atalk_task_deliverable` call.

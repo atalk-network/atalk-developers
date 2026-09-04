@@ -19,6 +19,7 @@ from .protocol import (
     encrypt_attachment,
     encrypt_attachment_chunk,
     encrypt_workroom_payload,
+    hash_b64url_payload,
     hash_canonical,
     sign_canonical,
     split_encrypted_attachment,
@@ -30,7 +31,11 @@ if TYPE_CHECKING:
     from .agent import Agent, RuntimeState
 
 _MAX_PROCESSED_EVENTS = 10_000
+_MAX_EVENT_FAILURES = 1_000
+_DEFAULT_EVENT_FAILURE_ATTEMPTS = 3
+_MAX_SAFE_INTEGER = 9_007_199_254_740_991
 _TYPED_KINDS = {"plan", "artifact_version", "deliverable", "cost", "approval_request"}
+_WORKROOM_EVENT_KINDS = {"message", "activity", *_TYPED_KINDS}
 
 
 class WorkroomClient:
@@ -59,6 +64,8 @@ class WorkroomClient:
         workroom_id: str,
         handler: Callable[[dict[str, Any]], Awaitable[None] | None],
         *, limit: int = 100, cancel: asyncio.Event | None = None,
+        max_event_failures: int = _DEFAULT_EVENT_FAILURE_ATTEMPTS,
+        on_event_quarantined: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None,
     ) -> int:
         """Invoke an agent handler only for events explicitly directed here.
 
@@ -68,30 +75,58 @@ class WorkroomClient:
         multi-agent routing.
         """
         cursor = self._agent._runtime_state.workroom_cursors.get(workroom_id, 0)
+        failure_limit = (
+            max(1, min(max_event_failures, 10))
+            if isinstance(max_event_failures, int) and not isinstance(max_event_failures, bool)
+            else _DEFAULT_EVENT_FAILURE_ATTEMPTS
+        )
         while True:
             _raise_cancelled(cancel)
-            page = await self._read_event_page(workroom_id, cursor, limit, cancel=cancel)
-            events = list(page.get("events", []))
-            for decrypted in events:
+            page = await self._read_raw_event_page(workroom_id, cursor, limit, cancel=cancel)
+            records = list(page.get("records", []))
+            legacy_audit_only: list[bool] = []
+            for record in records:
+                if record.get("membershipSnapshot") is not None:
+                    _event_membership_snapshot(record)
+                legacy_audit_only.append(_is_legacy_audit_only_event(record))
+            has_executable_candidate = any(not legacy for legacy in legacy_audit_only)
+            detail = await self.get(workroom_id, cursor, 1) if has_executable_candidate else None
+            for index, record in enumerate(records):
                 _raise_cancelled(cancel)
-                record = decrypted
-                event_id = str(record["event"]["eventId"])
-                if (event_id not in self._agent._runtime_state.processed_workroom_events
+                if legacy_audit_only[index]:
+                    already_handled = _workroom_event_was_processed(
+                        self._agent._runtime_state, record,
+                    )
+                    failure = None if already_handled else await self._quarantine_legacy_event(record)
+                    cursor = int(record["sequence"])
+                    if already_handled:
+                        await self._commit_event_cursor(record)
+                    if failure is not None and on_event_quarantined is not None:
+                        observed = on_event_quarantined(failure)
+                        if inspect.isawaitable(observed):
+                            await observed
+                    continue
+                try:
+                    decrypted = await self._decrypt_event(record, detail)
+                except Exception as error:
+                    failure = await self._record_event_failure(record, error, failure_limit)
+                    if failure["status"] != "quarantined":
+                        raise
+                    cursor = int(record["sequence"])
+                    if on_event_quarantined is not None:
+                        observed = on_event_quarantined(failure)
+                        if inspect.isawaitable(observed):
+                            await observed
+                    continue
+                await self._clear_event_failure(record)
+                if (not _workroom_event_was_processed(self._agent._runtime_state, record)
                         and bool(decrypted.get("directedToMe"))):
                     result = handler(_autonomous_event_view(decrypted))
                     if inspect.isawaitable(result):
                         await result
                 cursor = int(record["sequence"])
-
-                def remember(state: RuntimeState) -> None:
-                    state.workroom_cursors[workroom_id] = cursor
-                    state.processed_workroom_events[event_id] = True
-                    overflow = len(state.processed_workroom_events) - _MAX_PROCESSED_EVENTS
-                    for old_id in list(state.processed_workroom_events)[:max(0, overflow)]:
-                        state.processed_workroom_events.pop(old_id, None)
-
-                await self._agent._mutate_runtime_state(remember)
-            if page.get("nextAfterSequence") is None or not events:
+                await self._commit_event_cursor(record)
+            if page.get("nextAfterSequence") is None or not records:
                 return cursor
 
     async def read_audit_events(
@@ -101,12 +136,26 @@ class WorkroomClient:
         """Read all verified events without advancing the agent-handler cursor."""
         return await self._read_event_page(workroom_id, after_sequence, limit, cancel=cancel)
 
+    def list_quarantined_events(self, workroom_id: str | None = None) -> list[dict[str, Any]]:
+        """Return durable dead letters skipped so later Task work can continue."""
+        failures = getattr(self._agent._runtime_state, "workroom_event_failures", {})
+        return sorted((dict(failure) for failure in failures.values()
+                       if failure.get("status") == "quarantined"
+                       and (workroom_id is None or failure.get("workroomId") == workroom_id)),
+                      key=lambda failure: int(failure["sequence"]))
+
     async def watch(
         self, workroom_id: str, handler: Callable[[dict[str, Any]], Awaitable[None] | None],
         *, interval: float = 2.0, cancel: asyncio.Event | None = None,
+        max_event_failures: int = _DEFAULT_EVENT_FAILURE_ATTEMPTS,
+        on_event_quarantined: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None,
     ) -> None:
         while not (cancel and cancel.is_set()):
-            await self.poll(workroom_id, handler, cancel=cancel)
+            await self.poll(
+                workroom_id, handler, cancel=cancel,
+                max_event_failures=max_event_failures,
+                on_event_quarantined=on_event_quarantined,
+            )
             if cancel:
                 try:
                     await asyncio.wait_for(cancel.wait(), timeout=max(0.25, interval))
@@ -420,6 +469,8 @@ class WorkroomClient:
         workroom_ended = _workroom_stop_reason(detail["workroom"])
         if workroom_ended:
             return {"status": "denied", "code": "MANDATE_ENDED", "detail": workroom_ended}
+        if detail.get("membership", {}).get("role") == "observer":
+            return {"status": "denied", "code": "MANDATE_MISMATCH", "detail": "observer role is read-only"}
         views = [
             view for view in detail.get("latestMandates", [])
             if view["mandate"]["actorPeerId"] == credentials.peer["id"]
@@ -429,6 +480,21 @@ class WorkroomClient:
             return {"status": "denied", "code": "MANDATE_MISMATCH"}
         view = max(views, key=lambda item: int(item["mandate"]["revision"]))
         signed = _open_mandate(view, detail, credentials)
+        active_roles = {
+            str(item.get("membership", {}).get("peerId")): item.get("membership", {}).get("role")
+            for item in detail.get("members", [])
+            if not item.get("membership", {}).get("leftAt")
+        }
+        mandate_parties = (
+            signed["mandate"]["actorPeerId"],
+            signed["mandate"]["principalPeerId"],
+            signed["mandate"]["issuedByPeerId"],
+        )
+        if any(active_roles.get(str(peer_id)) in {None, "observer"} for peer_id in mandate_parties):
+            return {
+                "status": "denied", "code": "MANDATE_MISMATCH",
+                "detail": "mandate parties must remain active non-observer members",
+            }
         if view.get("revocation"):
             _verify_revocation(view["revocation"], detail)
             return {"status": "denied", "code": "MANDATE_ENDED", "detail": "revoked"}
@@ -546,7 +612,16 @@ class WorkroomClient:
     async def _decrypt_event(self, record: dict[str, Any], detail: dict[str, Any]) -> dict[str, Any]:
         credentials = self._agent._require_credentials()
         event = record["event"]
-        actor = _peer(detail, event["actorPeerId"])
+        membership_snapshot = _event_membership_snapshot(record)
+        legacy_audit_only = _is_legacy_audit_only_event(record)
+        historical_actor = next((item for item in membership_snapshot or []
+                                 if item["peerId"] == event["actorPeerId"]), None)
+        current_actor = _peer(detail, event["actorPeerId"])
+        if (historical_actor is not None and historical_actor.get("signingPublicKey")
+                and historical_actor.get("encryptionPublicKey")):
+            actor = _peer_from_event_snapshot(historical_actor, current_actor)
+        else:
+            actor = current_actor
         if actor is None:
             actor = await self._agent._request("GET", f"/v1/peers/{event['actorPeerId']}/keys")
         content = decrypt_workroom_payload(
@@ -558,12 +633,22 @@ class WorkroomClient:
         if content.get("kind") != event["kind"]:
             raise ValueError("WORKROOM_EVENT_KIND_MISMATCH")
         content = _validate_payload(content, str(event["threadId"]))
-        _validate_routing_bindings(content, detail, str(event["actorPeerId"]))
+        if membership_snapshot:
+            _validate_routing_bindings(
+                content, _snapshot_routing_detail(membership_snapshot),
+                str(event["actorPeerId"]), allow_observer_targets=True,
+            )
         _validate_projection(record.get("projection"), content)
+        historical_recipient = next((item for item in membership_snapshot or []
+                                     if item["peerId"] == credentials.peer["id"]), None)
+        current_role = str(detail.get("membership", {}).get("role", ""))
+        historical_role = str((historical_recipient or {}).get("role", ""))
         routing = _routing_context(
             content,
             recipient_peer_id=str(credentials.peer["id"]),
             actor_peer_id=str(event["actorPeerId"]),
+            recipient_role=("observer" if legacy_audit_only
+                            or "observer" in {current_role, historical_role} else current_role),
         )
         return {
             **record, "actor": actor, "content": content,
@@ -575,18 +660,116 @@ class WorkroomClient:
         self, workroom_id: str, after_sequence: int, limit: int,
         *, cancel: asyncio.Event | None = None,
     ) -> dict[str, Any]:
+        page = await self._read_raw_event_page(
+            workroom_id, after_sequence, limit, cancel=cancel,
+        )
+        detail = await self.get(workroom_id, after_sequence, 1)
+        events = []
+        for record in page["records"]:
+            _raise_cancelled(cancel)
+            events.append(await self._decrypt_event(record, detail))
+        return {"events": events, "nextAfterSequence": page.get("nextAfterSequence")}
+
+    async def _read_raw_event_page(
+        self, workroom_id: str, after_sequence: int, limit: int,
+        *, cancel: asyncio.Event | None = None,
+    ) -> dict[str, Any]:
         cursor = after_sequence if isinstance(after_sequence, int) and not isinstance(after_sequence, bool) and after_sequence >= 0 else 0
         page_size = limit if isinstance(limit, int) and not isinstance(limit, bool) else 100
         page_size = max(1, min(page_size, 500))
         page = await self._retry(lambda: self._agent._request(
             "GET", f"/v1/workrooms/{workroom_id}/events?afterSequence={cursor}&limit={page_size}",
         ), cancel=cancel)
-        detail = await self.get(workroom_id, cursor, 1)
-        events = []
-        for record in page.get("events", []):
-            _raise_cancelled(cancel)
-            events.append(await self._decrypt_event(record, detail))
-        return {"events": events, "nextAfterSequence": page.get("nextAfterSequence")}
+        records = _validate_raw_workroom_event_page(workroom_id, cursor, page)
+        return {"records": records, "nextAfterSequence": page.get("nextAfterSequence")}
+
+    async def _quarantine_legacy_event(self, record: dict[str, Any]) -> dict[str, Any]:
+        event = record["event"]
+        failure_key = _workroom_event_processing_id(record)
+        failure = {
+            "workroomId": str(event["workroomId"]),
+            "eventId": str(event["eventId"]),
+            "envelopeId": failure_key,
+            "sequence": int(record["sequence"]),
+            "attempts": 0,
+            "reason": "legacy_audit_only",
+            "lastError": "Legacy event has no complete event-time recipient-key binding",
+            "status": "quarantined",
+            "updatedAt": _utc_now(),
+        }
+
+        def quarantine(state: RuntimeState) -> None:
+            state.workroom_event_failures.pop(failure_key, None)
+            state.workroom_event_failures[failure_key] = dict(failure)
+            state.workroom_cursors[failure["workroomId"]] = failure["sequence"]
+            state.processed_workroom_events[failure_key] = True
+            _prune_runtime_event_state(state)
+
+        await self._agent._mutate_runtime_state(quarantine)
+        return failure
+
+    async def _record_event_failure(
+        self, record: dict[str, Any], error: Exception, maximum_attempts: int,
+    ) -> dict[str, Any]:
+        event = record["event"]
+        event_id = str(event["eventId"])
+        failure_key = _workroom_event_processing_id(record)
+        workroom_id = str(event["workroomId"])
+        sequence = int(record["sequence"])
+        failure: dict[str, Any] = {}
+
+        def remember(state: RuntimeState) -> None:
+            previous = state.workroom_event_failures.get(failure_key)
+            attempts = (
+                int(previous.get("attempts", 0)) + 1
+                if isinstance(previous, dict)
+                and previous.get("reason") == "processing_failed"
+                and previous.get("workroomId") == workroom_id
+                and previous.get("sequence") == sequence
+                else 1
+            )
+            failure.update({
+                "workroomId": workroom_id,
+                "eventId": event_id,
+                "envelopeId": failure_key,
+                "sequence": sequence,
+                "attempts": attempts,
+                "reason": "processing_failed",
+                "lastError": _event_failure_message(error),
+                "status": "quarantined" if attempts >= maximum_attempts else "retrying",
+                "updatedAt": _utc_now(),
+            })
+            state.workroom_event_failures.pop(failure_key, None)
+            state.workroom_event_failures[failure_key] = dict(failure)
+            if failure["status"] == "quarantined":
+                state.workroom_cursors[workroom_id] = sequence
+                state.processed_workroom_events[failure_key] = True
+            _prune_runtime_event_state(state)
+
+        await self._agent._mutate_runtime_state(remember)
+        return failure
+
+    async def _clear_event_failure(self, record: dict[str, Any]) -> None:
+        failure_key = _workroom_event_processing_id(record)
+        if failure_key not in self._agent._runtime_state.workroom_event_failures:
+            return
+
+        def clear(state: RuntimeState) -> None:
+            state.workroom_event_failures.pop(failure_key, None)
+
+        await self._agent._mutate_runtime_state(clear)
+
+    async def _commit_event_cursor(self, record: dict[str, Any]) -> None:
+        workroom_id = str(record["event"]["workroomId"])
+        processing_id = _workroom_event_processing_id(record)
+        sequence = int(record["sequence"])
+
+        def commit(state: RuntimeState) -> None:
+            state.workroom_cursors[workroom_id] = sequence
+            state.processed_workroom_events[processing_id] = True
+            _prune_runtime_event_state(state)
+
+        await self._agent._mutate_runtime_state(commit)
 
     async def _ensure_approval_requests(
         self, detail: dict[str, Any], signed: dict[str, Any], request: dict[str, Any], decision: dict[str, Any],
@@ -665,6 +848,89 @@ class WorkroomClient:
                 if attempt + 1 < attempts:
                     await asyncio.sleep(0.25 * (2 ** attempt))
         raise last_error or RuntimeError("WORKROOM_REQUEST_FAILED")
+
+
+def _event_failure_message(error: Exception) -> str:
+    return f"{type(error).__name__}: {error}"[:512]
+
+
+def _workroom_event_processing_id(record: dict[str, Any]) -> str:
+    return str(record["event"]["envelope"]["envelopeId"])
+
+
+def _workroom_event_was_processed(state: RuntimeState, record: dict[str, Any]) -> bool:
+    return bool(state.processed_workroom_events.get(_workroom_event_processing_id(record)))
+
+
+def _validate_raw_workroom_event_page(
+    workroom_id: str, cursor: int, page: dict[str, Any],
+) -> list[dict[str, Any]]:
+    raw_records = page.get("events")
+    if not isinstance(raw_records, list):
+        raise ValueError("WORKROOM_EVENT_PAGE_INVALID")
+    records: list[dict[str, Any]] = []
+    previous_sequence = cursor
+    for record in raw_records:
+        if not isinstance(record, dict):
+            raise ValueError("WORKROOM_EVENT_METADATA_INVALID")
+        sequence = record.get("sequence")
+        if (
+            not isinstance(sequence, int)
+            or isinstance(sequence, bool)
+            or sequence <= previous_sequence
+            or sequence > _MAX_SAFE_INTEGER
+        ):
+            raise ValueError("WORKROOM_EVENT_SEQUENCE_INVALID")
+        event = record.get("event")
+        envelope = event.get("envelope") if isinstance(event, dict) else None
+        if not isinstance(event, dict) or not isinstance(envelope, dict):
+            raise ValueError("WORKROOM_EVENT_METADATA_INVALID")
+        event_ids = [
+            event.get("eventId"), event.get("workroomId"), event.get("threadId"),
+            event.get("actorPeerId"), envelope.get("envelopeId"),
+            envelope.get("workroomId"), envelope.get("senderPeerId"),
+        ]
+        if not all(_is_uuid(value) for value in event_ids):
+            raise ValueError("WORKROOM_EVENT_METADATA_INVALID")
+        if event.get("kind") not in _WORKROOM_EVENT_KINDS:
+            raise ValueError("WORKROOM_EVENT_METADATA_INVALID")
+        if event["workroomId"] != workroom_id or envelope["workroomId"] != workroom_id:
+            raise ValueError("WORKROOM_EVENT_PAGE_WORKROOM_MISMATCH")
+        if (
+            envelope["senderPeerId"] != event["actorPeerId"]
+            or not isinstance(event.get("createdAt"), str)
+            or envelope.get("createdAt") != event["createdAt"]
+        ):
+            raise ValueError("WORKROOM_EVENT_METADATA_MISMATCH")
+        previous_sequence = sequence
+        records.append(record)
+    next_after_sequence = page.get("nextAfterSequence")
+    if next_after_sequence is not None and (
+        not isinstance(next_after_sequence, int)
+        or isinstance(next_after_sequence, bool)
+        or next_after_sequence > _MAX_SAFE_INTEGER
+        or not records
+        or next_after_sequence != records[-1]["sequence"]
+    ):
+        raise ValueError("WORKROOM_EVENT_CURSOR_INVALID")
+    return records
+
+
+def _is_uuid(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        uuid.UUID(value)
+        return True
+    except ValueError:
+        return False
+
+
+def _prune_runtime_event_state(state: RuntimeState) -> None:
+    while len(state.processed_workroom_events) > _MAX_PROCESSED_EVENTS:
+        state.processed_workroom_events.pop(next(iter(state.processed_workroom_events)))
+    while len(state.workroom_event_failures) > _MAX_EVENT_FAILURES:
+        state.workroom_event_failures.pop(next(iter(state.workroom_event_failures)))
 
 
 def _open_mandate(view: dict[str, Any], detail: dict[str, Any], credentials: Any) -> dict[str, Any]:
@@ -1112,6 +1378,102 @@ def _validate_mentions(value: Any) -> None:
             raise ValueError("INVALID_WORKROOM_MENTIONS")
 
 
+def _event_membership_snapshot(record: dict[str, Any]) -> list[dict[str, Any]] | None:
+    """Validate a historical identity view against the signed recipient ids."""
+    import re
+    raw = record.get("membershipSnapshot")
+    if raw is None:
+        return None
+    if not isinstance(raw, list) or not 1 <= len(raw) <= 1_000:
+        raise ValueError("WORKROOM_EVENT_MEMBERSHIP_SNAPSHOT_INVALID")
+    snapshot: list[dict[str, Any]] = []
+    peer_ids: list[str] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            raise ValueError("WORKROOM_EVENT_MEMBERSHIP_SNAPSHOT_INVALID")
+        try:
+            peer_id = str(uuid.UUID(str(item.get("peerId", ""))))
+        except (ValueError, AttributeError) as error:
+            raise ValueError("WORKROOM_EVENT_MEMBERSHIP_SNAPSHOT_INVALID") from error
+        signing_key = item.get("signingPublicKey")
+        encryption_key = item.get("encryptionPublicKey")
+        if (
+            item.get("peerType") not in {"HUMAN", "AGENT"}
+            or item.get("role") not in {"owner", "supervisor", "contributor", "observer"}
+            or not re.fullmatch(r"@[a-z0-9][a-z0-9._-]{1,62}", str(item.get("handle", "")))
+            or not re.fullmatch(r"[A-Za-z0-9_-]{1,4096}", str(signing_key or ""))
+            or not re.fullmatch(r"[A-Za-z0-9_-]{1,4096}", str(encryption_key or ""))
+        ):
+            raise ValueError("WORKROOM_EVENT_MEMBERSHIP_SNAPSHOT_INVALID")
+        peer_ids.append(peer_id)
+        snapshot.append({**item, "peerId": peer_id})
+    actor_peer_id = str(record.get("event", {}).get("actorPeerId", ""))
+    if len(set(peer_ids)) != len(peer_ids) or actor_peer_id not in peer_ids:
+        raise ValueError("WORKROOM_EVENT_MEMBERSHIP_SNAPSHOT_INVALID")
+    envelope = record.get("event", {}).get("envelope", {})
+    if envelope.get("cipherSuite") == "ATALK_GROUP_BOX_V1":
+        wrapped_keys = envelope.get("wrappedKeys", [])
+        recipients = [str(item.get("recipientPeerId", "")) for item in wrapped_keys]
+        if len(set(recipients)) != len(recipients) or set(recipients) != set(peer_ids):
+            raise ValueError("WORKROOM_EVENT_MEMBERSHIP_SNAPSHOT_MISMATCH")
+        members = {item["peerId"]: item for item in snapshot}
+        hashes = [wrapped.get("recipientEncryptionKeyHash") for wrapped in wrapped_keys]
+        if not all(value is None for value in hashes) and any(
+            not members.get(str(wrapped.get("recipientPeerId", "")), {}).get("encryptionPublicKey")
+            or wrapped.get("recipientEncryptionKeyHash") != hash_b64url_payload(
+                members[str(wrapped.get("recipientPeerId", ""))]["encryptionPublicKey"],
+            )
+            for wrapped in wrapped_keys
+        ):
+            raise ValueError("WORKROOM_EVENT_RECIPIENT_KEY_MISMATCH")
+    return snapshot
+
+
+def _is_legacy_audit_only_event(record: dict[str, Any]) -> bool:
+    if record.get("membershipSnapshot") is None:
+        return True
+    envelope = record.get("event", {}).get("envelope", {})
+    return envelope.get("cipherSuite") == "ATALK_GROUP_BOX_V1" and all(
+        item.get("recipientEncryptionKeyHash") is None
+        for item in envelope.get("wrappedKeys", [])
+        if isinstance(item, dict)
+    )
+
+
+def _snapshot_routing_detail(snapshot: list[dict[str, Any]]) -> dict[str, Any]:
+    return {"members": [{
+        "membership": {
+            "peerId": item["peerId"],
+            "peerType": item["peerType"],
+            "role": item["role"],
+        },
+        "peer": {
+            "id": item["peerId"],
+            "type": item["peerType"],
+            "status": "ACTIVE",
+            "handle": item["handle"],
+        },
+    } for item in snapshot]}
+
+
+def _peer_from_event_snapshot(
+    snapshot: dict[str, Any], current: dict[str, Any] | None,
+) -> dict[str, Any]:
+    return {
+        **(current or {
+            "displayName": str(snapshot["handle"])[1:],
+            "publicDiscoverable": False,
+            "organizationDiscoverable": False,
+        }),
+        "id": snapshot["peerId"],
+        "type": snapshot["peerType"],
+        "status": "ACTIVE",
+        "handle": snapshot["handle"],
+        "signingPublicKey": snapshot["signingPublicKey"],
+        "encryptionPublicKey": snapshot["encryptionPublicKey"],
+    }
+
+
 def _active_routing_peers(detail: dict[str, Any]) -> dict[str, dict[str, Any]]:
     """Return canonical, currently active Task identities keyed by peer id."""
     peers: dict[str, dict[str, Any]] = {}
@@ -1132,12 +1494,13 @@ def _active_routing_peers(detail: dict[str, Any]) -> dict[str, dict[str, Any]]:
             or peer_id in peers
         ):
             raise ValueError("WORKROOM_ROUTING_MEMBER_INVALID")
-        peers[peer_id] = peer
+        peers[peer_id] = {"peer": peer, "role": membership.get("role")}
     return peers
 
 
 def _validate_routing_bindings(
     content: dict[str, Any], detail: dict[str, Any], actor_peer_id: str,
+    *, allow_observer_targets: bool = False,
 ) -> None:
     """Bind every encrypted routing target to one exact active Task identity.
 
@@ -1151,9 +1514,10 @@ def _validate_routing_bindings(
         if peer_id in seen_mentions:
             raise ValueError("WORKROOM_ROUTING_DUPLICATE_TARGET")
         seen_mentions.add(peer_id)
-        peer = peers.get(peer_id)
-        if peer is None:
+        binding = peers.get(peer_id)
+        if binding is None:
             raise ValueError("WORKROOM_ROUTING_TARGET_NOT_ACTIVE")
+        peer = binding["peer"]
         expected_type = peer.get("type")
         if expected_type not in {"AGENT", "HUMAN"}:
             raise ValueError("WORKROOM_ROUTING_MEMBER_INVALID")
@@ -1161,6 +1525,9 @@ def _validate_routing_bindings(
             raise ValueError("WORKROOM_ROUTING_IDENTITY_MISMATCH")
         if mention.get("intent", "direct") == "direct" and peer_id == actor_peer_id:
             raise ValueError("WORKROOM_SELF_DIRECTION_FORBIDDEN")
+        if (mention.get("intent", "direct") == "direct"
+                and binding.get("role") == "observer" and not allow_observer_targets):
+            raise ValueError("WORKROOM_ROUTING_TARGET_NOT_EXECUTABLE")
 
     if content.get("kind") != "plan":
         return
@@ -1170,6 +1537,9 @@ def _validate_routing_bindings(
             raise ValueError("WORKROOM_ROUTING_DUPLICATE_TARGET")
         if any(peer_id not in peers for peer_id in assigned):
             raise ValueError("WORKROOM_ROUTING_TARGET_NOT_ACTIVE")
+        if (not allow_observer_targets
+                and any(peers[peer_id].get("role") == "observer" for peer_id in assigned)):
+            raise ValueError("WORKROOM_ROUTING_TARGET_NOT_EXECUTABLE")
 
 
 def _active_peer_ids(detail: dict[str, Any]) -> list[str]:
@@ -1216,9 +1586,10 @@ def _publication_effect(content: dict[str, Any]) -> str:
 
 def _routing_context(
     content: dict[str, Any], recipient_peer_id: str, actor_peer_id: str | None = None,
+    recipient_role: str | None = None,
 ) -> dict[str, Any]:
     """Return only the routing slice executable by one recipient."""
-    if actor_peer_id is not None and recipient_peer_id == actor_peer_id:
+    if (actor_peer_id is not None and recipient_peer_id == actor_peer_id) or recipient_role == "observer":
         return {"directedToMe": False, "directMentions": [], "assignedSteps": []}
     direct_mentions = [
         dict(item)

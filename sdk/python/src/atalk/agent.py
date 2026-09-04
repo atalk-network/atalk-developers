@@ -142,6 +142,7 @@ class RuntimeState:
     counterparties: dict[str, dict[str, Any]]
     workroom_cursors: dict[str, int] = field(default_factory=dict)
     processed_workroom_events: dict[str, bool] = field(default_factory=dict)
+    workroom_event_failures: dict[str, dict[str, Any]] = field(default_factory=dict)
     workroom_mandate_usage: dict[str, dict[str, Any]] = field(default_factory=dict)
     pending_activation: PendingActivation | None = None
 
@@ -1402,6 +1403,7 @@ def _runtime_state_to_json(state: RuntimeState) -> dict[str, Any]:
         "counterparties": state.counterparties,
         "workroomCursors": state.workroom_cursors,
         "processedWorkroomEvents": state.processed_workroom_events,
+        "workroomEventFailures": state.workroom_event_failures,
         "workroomMandateUsage": state.workroom_mandate_usage,
         **({"pendingActivation": {
             "requestId": state.pending_activation.request_id,
@@ -1424,11 +1426,38 @@ def _runtime_state_from_json(value: Any) -> RuntimeState:
         if isinstance(value.get("workroomCursors", {}), dict) else {},
         processed_workroom_events={str(key): bool(processed) for key, processed in value.get("processedWorkroomEvents", {}).items()}
         if isinstance(value.get("processedWorkroomEvents", {}), dict) else {},
+        workroom_event_failures=_workroom_event_failures_from_json(value.get("workroomEventFailures")),
         workroom_mandate_usage={str(key): dict(usage) for key, usage in value.get("workroomMandateUsage", {}).items()
         if isinstance(value.get("workroomMandateUsage", {}), dict) and isinstance(usage, dict)}
         if isinstance(value.get("workroomMandateUsage", {}), dict) else {},
         pending_activation=_pending_activation_from_json(value.get("pendingActivation")),
     )
+
+
+def _workroom_event_failures_from_json(value: Any) -> dict[str, dict[str, Any]]:
+    if not isinstance(value, dict):
+        return {}
+    valid: list[tuple[str, dict[str, Any]]] = []
+    for key, candidate in value.items():
+        if (
+            isinstance(key, str)
+            and isinstance(candidate, dict)
+            and isinstance(candidate.get("workroomId"), str)
+            and isinstance(candidate.get("eventId"), str)
+            and (candidate.get("envelopeId") is None or isinstance(candidate.get("envelopeId"), str))
+            and isinstance(candidate.get("sequence"), int)
+            and not isinstance(candidate.get("sequence"), bool)
+            and candidate["sequence"] >= 0
+            and isinstance(candidate.get("attempts"), int)
+            and not isinstance(candidate.get("attempts"), bool)
+            and candidate["attempts"] >= 0
+            and candidate.get("reason") in {"legacy_audit_only", "processing_failed"}
+            and isinstance(candidate.get("lastError"), str)
+            and candidate.get("status") in {"retrying", "quarantined"}
+            and isinstance(candidate.get("updatedAt"), str)
+        ):
+            valid.append((key, dict(candidate)))
+    return dict(valid[-1_000:])
 
 
 def _pending_activation_from_json(value: Any) -> PendingActivation | None:

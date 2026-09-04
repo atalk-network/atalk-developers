@@ -15,6 +15,7 @@ import {
   workroomApproverRoleSchema,
   workroomApprovalRequestPayloadSchema,
   workroomContentPayloadSchema,
+  workroomEventMembershipSnapshotSchema,
   workroomPlanPayloadSchema,
 } from "./workrooms.js";
 
@@ -54,6 +55,23 @@ describe("workroom protocol", () => {
     expect(workroomApproverRoleSchema.safeParse("observer").success).toBe(false);
   });
 
+  it("models the immutable routing identity and role stored with an event", () => {
+    expect(workroomEventMembershipSnapshotSchema.parse({
+      peerId: AGENT_ID,
+      peerType: "AGENT",
+      role: "contributor",
+      handle: "@research.agent",
+      signingPublicKey: "c2lnbmluZw",
+      encryptionPublicKey: "ZW5jcnlwdGlvbg",
+    })).toMatchObject({ peerId: AGENT_ID, role: "contributor" });
+    expect(workroomEventMembershipSnapshotSchema.safeParse({
+      peerId: AGENT_ID,
+      peerType: "AGENT",
+      role: "worker",
+      handle: "@research.agent",
+    }).success).toBe(false);
+  });
+
   it("models encrypted multi-member activity with explicit agent mentions", () => {
     const content = workroomContentPayloadSchema.parse({
       version: 1,
@@ -85,8 +103,8 @@ describe("workroom protocol", () => {
 
   it("binds structured routing to the exact active identity and rejects self direction", () => {
     const peers = [
-      { id: HUMAN_ID, handle: "@task.owner", type: "HUMAN", status: "ACTIVE" },
-      { id: AGENT_ID, handle: "@research.agent", type: "AGENT", status: "ACTIVE" },
+      { id: HUMAN_ID, handle: "@task.owner", type: "HUMAN", status: "ACTIVE", role: "owner" },
+      { id: AGENT_ID, handle: "@research.agent", type: "AGENT", status: "ACTIVE", role: "contributor" },
     ] as const;
     const message = workroomContentPayloadSchema.parse({
       version: 1, kind: "message", threadId: THREAD_ID, body: "Research this",
@@ -114,6 +132,16 @@ describe("workroom protocol", () => {
     });
     expect(() => validateWorkroomContentRouting(stalePlan, peers, HUMAN_ID))
       .toThrow("WORKROOM_ROUTING_TARGET_NOT_ACTIVE");
+
+    const observerPeers = peers.map((peer) => peer.id === AGENT_ID ? { ...peer, role: "observer" as const } : peer);
+    expect(() => validateWorkroomContentRouting(message, observerPeers, HUMAN_ID))
+      .toThrow("WORKROOM_ROUTING_TARGET_NOT_EXECUTABLE");
+    expect(() => validateWorkroomContentRouting(message, observerPeers, HUMAN_ID, { allowObserverTargets: true }))
+      .not.toThrow();
+    expect(() => validateWorkroomContentRouting({
+      ...stalePlan,
+      steps: [{ ...stalePlan.steps[0]!, assignedPeerIds: [AGENT_ID] }],
+    }, observerPeers, HUMAN_ID)).toThrow("WORKROOM_ROUTING_TARGET_NOT_EXECUTABLE");
   });
 
   it("starts autonomous turns only for direct mentions or own executable plan steps", () => {
@@ -128,6 +156,9 @@ describe("workroom protocol", () => {
       ...direct, mentions: [{ ...direct.mentions[0]!, intent: "fyi" }],
     }, AGENT_ID, HUMAN_ID).directedToMe).toBe(false);
     expect(resolveWorkroomRouting(direct, HUMAN_ID, HUMAN_ID).directedToMe).toBe(false);
+    expect(resolveWorkroomRouting(direct, AGENT_ID, HUMAN_ID, "observer")).toEqual({
+      directedToMe: false, directMentions: [], assignedSteps: [],
+    });
 
     const plan = workroomContentPayloadSchema.parse({
       version: 1, kind: "plan", planVersion: 1, summary: "Coordinate",
@@ -250,6 +281,10 @@ describe("workroom protocol", () => {
     });
 
     expect(encrypted.wrappedKeys.map(({ recipientPeerId }) => recipientPeerId)).toEqual([OTHER_ID, AGENT_ID]);
+    expect(encrypted.wrappedKeys.map(({ recipientEncryptionKeyHash }) => recipientEncryptionKeyHash)).toEqual([
+      hashBase64UrlPayload(human.encryptionPublicKey),
+      hashBase64UrlPayload(agent.encryptionPublicKey),
+    ]);
     expect(decryptWorkroomPayload<{ objective: string }>({
       envelope: encrypted,
       recipientPeerId: AGENT_ID,

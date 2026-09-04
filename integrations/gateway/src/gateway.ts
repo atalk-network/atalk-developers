@@ -5,7 +5,7 @@ import { createServer, type IncomingMessage as HttpRequest, type Server, type Se
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { Agent, type IncomingMessage, type SentMessage } from "@atalk/sdk";
+import { Agent, type IncomingMessage, type SentMessage, type WorkroomDetail } from "@atalk/sdk";
 import { GATEWAY_SPEC, MAX_ATTACHMENT_BYTES } from "./constants.js";
 import {
   FileGatewayInboxStore,
@@ -33,6 +33,10 @@ export interface AtalkGatewayOptions {
   host?: string;
   port?: number;
   apiKey?: string;
+  /** Explicit operator opt-in for the complete non-autonomous Task history. */
+  allowWorkroomAudit?: boolean;
+  /** Explicit trusted/manual-client opt-in for Workroom I/O that bypasses mandate enforcement. */
+  allowUnsafeWorkroomIo?: boolean;
   allowOrigin?: string;
   webhookUrl?: string;
   webhookSecret?: string;
@@ -57,6 +61,12 @@ export interface AtalkGatewayRuntime {
 
 interface JsonBody {
   [key: string]: unknown;
+}
+
+/** Metadata surface for agent runtimes; complete events require explicit audit opt-in. */
+function workroomMetadataView(detail: WorkroomDetail) {
+  const { events: _events, nextAfterSequence: _nextAfterSequence, ...metadata } = detail;
+  return metadata;
 }
 
 function isLoopback(host: string): boolean {
@@ -231,6 +241,8 @@ class GatewayRuntime implements AtalkGatewayRuntime {
   readonly host: string;
   private readonly configuredPort: number;
   private readonly apiKey: string | undefined;
+  private readonly allowWorkroomAudit: boolean;
+  private readonly allowUnsafeWorkroomIo: boolean;
   private readonly allowOrigin: string | undefined;
   private readonly webhookUrl: string | undefined;
   private readonly webhookSecret: string | undefined;
@@ -244,6 +256,8 @@ class GatewayRuntime implements AtalkGatewayRuntime {
     this.host = options.host ?? "127.0.0.1";
     this.configuredPort = options.port ?? 8788;
     this.apiKey = options.apiKey;
+    this.allowWorkroomAudit = options.allowWorkroomAudit ?? false;
+    this.allowUnsafeWorkroomIo = options.allowUnsafeWorkroomIo ?? false;
     this.allowOrigin = options.allowOrigin;
     this.webhookUrl = options.webhookUrl;
     this.webhookSecret = options.webhookSecret;
@@ -366,7 +380,9 @@ class GatewayRuntime implements AtalkGatewayRuntime {
       return;
     }
     if (request.method === "GET" && (url.pathname === "/openapi.json" || url.pathname === "/v1/openapi.json")) {
-      sendJson(response, 200, gatewayOpenApiDocument(this.url));
+      sendJson(response, 200, gatewayOpenApiDocument(this.url, {
+        allowUnsafeWorkroomIo: this.allowUnsafeWorkroomIo,
+      }));
       return;
     }
     if (request.method === "GET" && (url.pathname === "/" || url.pathname === "/v1/capabilities" || url.pathname === "/.well-known/atalk-agent-gateway")) {
@@ -456,14 +472,27 @@ class GatewayRuntime implements AtalkGatewayRuntime {
     if (workroomMatch) {
       const workroomId = decodeURIComponent(workroomMatch[1]!);
       const action = workroomMatch[2]!;
+      const unsafeWorkroomIo = request.method === "POST"
+        && (action === "/events" || action === "/attachments" || action === "/attachments/download");
+      if (unsafeWorkroomIo && !this.allowUnsafeWorkroomIo) {
+        throw new HttpError(
+          403,
+          "UNSAFE_WORKROOM_IO_DISABLED",
+          "Enable unsafe Workroom I/O explicitly only for a trusted manual client",
+        );
+      }
       if (request.method === "GET" && action === "") {
-        sendJson(response, 200, await this.agent.workrooms.get(workroomId));
+        const detail = await this.agent.workrooms.get(workroomId, Number.MAX_SAFE_INTEGER, 1);
+        sendJson(response, 200, workroomMetadataView(detail));
         return;
       }
       if (request.method === "GET" && action === "/events") {
         const scope = url.searchParams.get("scope") ?? "directed";
         const limit = positiveInteger(Number.parseInt(url.searchParams.get("limit") ?? "100", 10), 100, 500) || 100;
         if (scope === "audit") {
+          if (!this.allowWorkroomAudit) {
+            throw new HttpError(403, "WORKROOM_AUDIT_DISABLED", "Enable operator Task audit explicitly in the gateway configuration");
+          }
           const afterSequence = positiveInteger(
             Number.parseInt(url.searchParams.get("afterSequence") ?? "0", 10),
             0,
@@ -479,7 +508,7 @@ class GatewayRuntime implements AtalkGatewayRuntime {
         const cursor = await this.agent.workrooms.poll(workroomId, (event) => {
           // Defense in depth for injected/custom SDK clients: an agent-facing
           // gateway never turns shared room chatter into a model event.
-          if (event.directedToMe) events.push(event);
+          if (event.directedToMe && event.routing?.directedToMe === true) events.push(event);
         }, { limit });
         sendJson(response, 200, { events, cursor, scope: "directed" });
         return;

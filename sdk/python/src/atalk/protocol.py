@@ -120,6 +120,15 @@ def encrypt_workroom_payload(
         sender_encryption_secret_key=sender_encryption_secret_key,
         recipients=recipients,
     )
+    recipient_keys = {
+        recipient["peerId"]: recipient["encryptionPublicKey"] for recipient in recipients
+    }
+    wrapped_keys = [{
+        **wrapped,
+        "recipientEncryptionKeyHash": hash_b64url_payload(
+            recipient_keys[wrapped["recipientPeerId"]],
+        ),
+    } for wrapped in sealed["wrappedKeys"]]
     unsigned = {
         "version": 1,
         "cipherSuite": "ATALK_GROUP_BOX_V1",
@@ -128,6 +137,7 @@ def encrypt_workroom_payload(
         "senderPeerId": sender_peer_id,
         "keyEpoch": key_epoch,
         **sealed,
+        "wrappedKeys": wrapped_keys,
         "ciphertextHash": hash_b64url_payload(sealed["ciphertext"]),
         "createdAt": created_at,
     }

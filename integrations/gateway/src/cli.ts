@@ -46,7 +46,11 @@ function parseOptions(args: string[]): CliOptions {
 }
 
 function help(): void {
-  process.stdout.write(`aTalk Agent Gateway\n\nUsage:\n  atalk-gateway pair       Pair an aTalk agent once\n  atalk-gateway start      Start the local HTTP/webhook gateway\n  atalk-gateway doctor     Verify credentials and connectivity\n\nOptions:\n  --base-url URL           aTalk API (default: https://api.atalk.ar)\n  --credential-path PATH   Private agent credential file location\n  --inbox-path PATH        Durable inbox file (defaults next to credentials)\n  --host HOST              Listen host (default: 127.0.0.1)\n  --port PORT              Listen port (default: 8788)\n  --webhook-url URL        Deliver incoming events to a webhook\n\nEnvironment:\n  ATALK_AGENT_TOKEN        One-time activation token (pairing only)\n  ATALK_GATEWAY_API_KEY    Required when listening outside localhost\n  ATALK_GATEWAY_INBOX_PATH Optional durable inbox file location\n  ATALK_WEBHOOK_SECRET     HMAC-SHA256 webhook signing secret\n  ATALK_GATEWAY_ALLOW_ORIGIN  Optional browser CORS origin\n`);
+  process.stdout.write(`aTalk Agent Gateway\n\nUsage:\n  atalk-gateway pair       Pair an aTalk agent once\n  atalk-gateway start      Start the local HTTP/webhook gateway\n  atalk-gateway doctor     Verify credentials and connectivity\n\nOptions:\n  --base-url URL           aTalk API (default: https://api.atalk.ar)\n  --credential-path PATH   Private agent credential file location\n  --inbox-path PATH        Durable inbox file (defaults next to credentials)\n  --host HOST              Listen host (default: 127.0.0.1)\n  --port PORT              Listen port (default: 8788)\n  --webhook-url URL        Deliver incoming events to a webhook\n\nEnvironment:\n  ATALK_AGENT_TOKEN        One-time activation token (pairing only)\n  ATALK_GATEWAY_API_KEY    Required when listening outside localhost\n  ATALK_GATEWAY_INBOX_PATH Optional durable inbox file location\n  ATALK_ENABLE_WORKROOM_AUDIT  Set to true only for an operator-facing gateway\n  ATALK_ENABLE_UNSAFE_WORKROOM_IO  Set to true only for a trusted manual client\n  ATALK_WEBHOOK_SECRET     HMAC-SHA256 webhook signing secret\n  ATALK_GATEWAY_ALLOW_ORIGIN  Optional browser CORS origin\n`);
+}
+
+function environmentFlag(value: string | undefined): boolean {
+  return value === "1" || value?.toLowerCase() === "true";
 }
 
 async function readSecret(prompt: string): Promise<string> {
@@ -121,6 +125,8 @@ async function start(options: CliOptions): Promise<void> {
     port: options.port,
     ...(process.env.ATALK_AGENT_TOKEN ? { token: process.env.ATALK_AGENT_TOKEN } : {}),
     ...(process.env.ATALK_GATEWAY_API_KEY ? { apiKey: process.env.ATALK_GATEWAY_API_KEY } : {}),
+    ...(environmentFlag(process.env.ATALK_ENABLE_WORKROOM_AUDIT) ? { allowWorkroomAudit: true } : {}),
+    ...(environmentFlag(process.env.ATALK_ENABLE_UNSAFE_WORKROOM_IO) ? { allowUnsafeWorkroomIo: true } : {}),
     ...(process.env.ATALK_GATEWAY_ALLOW_ORIGIN ? { allowOrigin: process.env.ATALK_GATEWAY_ALLOW_ORIGIN } : {}),
     ...(options.webhookUrl ? { webhookUrl: options.webhookUrl } : {}),
     ...(process.env.ATALK_WEBHOOK_SECRET ? { webhookSecret: process.env.ATALK_WEBHOOK_SECRET } : {}),

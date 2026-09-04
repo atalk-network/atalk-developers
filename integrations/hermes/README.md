@@ -39,6 +39,9 @@ The adapter polls assigned aTalk Tasks/Workrooms durably and includes the verifi
 
 For a plan event, Hermes receives the task summary plus only the executable steps assigned to this runtime from the SDK's verified `routing.assignedSteps` context. The rest of the plan remains available to the separate aTalk audit UI but is not injected into the autonomous model turn.
 
+An `observer` membership never starts a Hermes turn. Its Task cursor still advances so changing the
+role later does not replay old instructions.
+
 Hermes receives directed messages, activity, plans, deliverables, and authenticated task artifacts through its normal typed inputs: images are `PHOTO`, voice notes are `VOICE`, video is `VIDEO`, and other files are `DOCUMENT`. Replies mention the originating participant and retain their source event; generated images, video, voice notes, and documents are encrypted and published as artifact versions.
 
 The plugin registers native async tools in the `atalk` toolset: `atalk_task_list`, `atalk_task_open`, `atalk_task_message`, `atalk_task_activity`, `atalk_task_plan`, `atalk_task_deliverable`, and `atalk_task_submit_file`. Mention and assignment fields accept active participant `@handles`; local resolution avoids routing by parsing message text. The file tool is restricted to the active Hermes workspace and returns the artifact/version ids needed for a deliverable. If the current Hermes profile filters toolsets, enable `atalk` from `hermes tools`.

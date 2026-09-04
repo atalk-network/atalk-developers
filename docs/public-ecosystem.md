@@ -55,6 +55,10 @@ Package metadata, changelogs and documentation links must point to that public U
 commit must contain the exact source and docs represented by each release tag so npm/PyPI provenance
 never points to older behavior.
 
+Product-only vertical tests that import private backend modules are not part of the public SDK source
+export. They must remain outside release tarballs and should live under the private backend test tree;
+all runtime source and self-contained SDK tests represented by a public tag must remain byte-identical.
+
 In particular, a release that advertises multi-participant Tasks must include the Workroom protocol,
 both SDK clients, Gateway/OpenClaw/Hermes/MCP support and the two public Task documents above. The
 landing must not link a new document until the corresponding public commit is reachable without

@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { open, stat } from "node:fs/promises";
 import { basename, extname, resolve } from "node:path";
 import {
+  appendWorkroomEventSchema,
   attachmentPartDescriptors,
   createChunkedAttachmentDescriptor,
   decryptMandateTerms,
@@ -10,6 +11,7 @@ import {
   encryptAttachmentChunk,
   encryptWorkroomPayload,
   evaluateMandateUse,
+  hashBase64UrlPayload,
   hashCanonical,
   mandateCommitmentMatchesEncryptedTerms,
   mandateCommitmentMatchesTerms,
@@ -24,6 +26,7 @@ import {
   workroomApprovalRequestPayloadSchema,
   workroomContentPayloadSchema,
   workroomDescriptorSchema,
+  workroomEventMembershipSnapshotSchema,
   type AppendWorkroomEvent,
   type AttachmentDescriptor,
   type MandateUseDecision,
@@ -38,6 +41,7 @@ import {
   type WorkroomContentPayload,
   type WorkroomDescriptor,
   type WorkroomEncryptedEnvelope,
+  type WorkroomEventMembershipSnapshot,
   type WorkroomMember,
   type WorkroomRoutingMatch,
   type WorkroomThread,
@@ -48,9 +52,15 @@ import type {
   AgentAttachmentInput,
   AttachmentTransferOptions,
 } from "./agent.js";
-import type { AgentRuntimeState, WorkroomMandateUsage } from "./runtime-state-store.js";
+import type {
+  AgentRuntimeState,
+  WorkroomEventFailureState,
+  WorkroomMandateUsage,
+} from "./runtime-state-store.js";
 
 const MAX_PROCESSED_WORKROOM_EVENTS = 10_000;
+const MAX_WORKROOM_EVENT_FAILURES = 1_000;
+const DEFAULT_WORKROOM_EVENT_FAILURE_ATTEMPTS = 3;
 
 interface WorkroomMembership extends WorkroomMember {
   id: string;
@@ -130,6 +140,7 @@ export interface WorkroomDetail {
 interface WorkroomEventRecord {
   sequence: number;
   event: AppendWorkroomEvent;
+  membershipSnapshot?: WorkroomEventMembershipSnapshot[];
   projection?: WorkroomEventProjection;
 }
 
@@ -160,6 +171,10 @@ export interface WorkroomPollOptions {
   limit?: number;
   signal?: AbortSignal;
   maxAttempts?: number;
+  /** Processing failures are retried durably before the event is quarantined. */
+  maxEventFailures?: number;
+  /** Observability hook; cursor/dead-letter state is persisted before invocation. */
+  onEventQuarantined?: (failure: WorkroomEventFailureState) => void | Promise<void>;
 }
 
 export interface WorkroomEventPage {
@@ -286,33 +301,53 @@ export class WorkroomClient {
   ): Promise<number> {
     let cursor = this.dependencies.runtimeState().workroomCursors?.[workroomId] ?? 0;
     const limit = Math.max(1, Math.min(options.limit ?? 100, 500));
+    const requestedFailureLimit = options.maxEventFailures ?? DEFAULT_WORKROOM_EVENT_FAILURE_ATTEMPTS;
+    const maxEventFailures = Number.isSafeInteger(requestedFailureLimit)
+      ? Math.max(1, Math.min(requestedFailureLimit, 10))
+      : DEFAULT_WORKROOM_EVENT_FAILURE_ATTEMPTS;
     do {
       throwIfAborted(options.signal);
-      const page = await this.readEventPage(
+      const page = await this.readRawEventPage(
         workroomId,
         cursor,
         limit,
         options.maxAttempts ?? 3,
         options.signal,
       );
-      for (const decrypted of page.events) {
+      const legacyAuditOnly: boolean[] = [];
+      for (const record of page.records) {
+        if (record.membershipSnapshot) exactEventMembershipSnapshot(record);
+        legacyAuditOnly.push(isLegacyAuditOnlyWorkroomEvent(record));
+      }
+      const hasExecutableCandidate = legacyAuditOnly.some((legacy) => !legacy);
+      const detail = hasExecutableCandidate ? await this.get(workroomId, cursor, 1) : undefined;
+      for (const [index, record] of page.records.entries()) {
         throwIfAborted(options.signal);
-        const record = decrypted;
-        const alreadyHandled = this.dependencies.runtimeState().processedWorkroomEvents?.[record.event.eventId];
+        if (legacyAuditOnly[index]) {
+          const alreadyHandled = workroomEventWasProcessed(this.dependencies.runtimeState(), record);
+          const failure = alreadyHandled ? undefined : await this.quarantineLegacyEvent(record);
+          cursor = record.sequence;
+          if (alreadyHandled) await this.commitEventCursor(record);
+          if (failure && options.onEventQuarantined) await options.onEventQuarantined(failure);
+          continue;
+        }
+        let decrypted: DecryptedWorkroomEvent;
+        try {
+          decrypted = await this.decryptEvent(record, detail!);
+        } catch (error) {
+          const failure = await this.recordEventFailure(record, error, maxEventFailures);
+          if (failure.status !== "quarantined") throw error;
+          cursor = record.sequence;
+          if (options.onEventQuarantined) await options.onEventQuarantined(failure);
+          continue;
+        }
+        await this.clearEventFailure(record);
+        const alreadyHandled = workroomEventWasProcessed(this.dependencies.runtimeState(), record);
         if (!alreadyHandled && decrypted.directedToMe) await handler(autonomousEventView(decrypted));
         cursor = record.sequence;
-        await this.dependencies.mutateRuntimeState((state) => {
-          state.workroomCursors ??= {};
-          state.processedWorkroomEvents ??= {};
-          state.workroomCursors[workroomId] = cursor;
-          state.processedWorkroomEvents[record.event.eventId] = true;
-          const ids = Object.keys(state.processedWorkroomEvents);
-          for (let index = 0; index < ids.length - MAX_PROCESSED_WORKROOM_EVENTS; index += 1) {
-            delete state.processedWorkroomEvents[ids[index]!];
-          }
-        });
+        await this.commitEventCursor(record);
       }
-      if (page.nextAfterSequence === null || page.events.length === 0) return cursor;
+      if (page.nextAfterSequence === null || page.records.length === 0) return cursor;
     } while (true);
   }
 
@@ -328,6 +363,15 @@ export class WorkroomClient {
     signal?: AbortSignal,
   ): Promise<WorkroomEventPage> {
     return this.readEventPage(workroomId, afterSequence, limit, 3, signal);
+  }
+
+  /** Durable processing failures that were skipped so later Task work can continue. */
+  listQuarantinedEvents(workroomId?: string): WorkroomEventFailureState[] {
+    return Object.values(this.dependencies.runtimeState().workroomEventFailures ?? {})
+      .filter((failure) => failure.status === "quarantined"
+        && (!workroomId || failure.workroomId === workroomId))
+      .map((failure) => ({ ...failure }))
+      .sort((left, right) => left.sequence - right.sequence);
   }
 
   /** Long-polls using the durable cursor until aborted. */
@@ -356,7 +400,7 @@ export class WorkroomClient {
     const credentials = this.dependencies.credentials();
     const detail = await this.get(workroomId, 0, 1);
     const activePeers = exactActiveMemberPeers(detail);
-    validateWorkroomContentRouting(content, activePeers.map(routingPeer), credentials.peer.id);
+    validateWorkroomContentRouting(content, exactActiveRoutingPeers(detail), credentials.peer.id);
     const recipients = activePeers.map(({ id, encryptionPublicKey }) => ({ peerId: id, encryptionPublicKey }));
     if (!recipients.some(({ peerId }) => peerId === credentials.peer.id)) throw new Error("WORKROOM_MEMBERSHIP_REQUIRED");
     if (detail.membership.role === "observer") throw new Error("WORKROOM_READ_ONLY");
@@ -657,11 +701,35 @@ export class WorkroomClient {
     if (workroomEnded) {
       return { status: "denied", decision: { status: "denied", code: "MANDATE_ENDED", detail: workroomEnded } };
     }
+    if (detail.membership.role === "observer") {
+      return {
+        status: "denied",
+        decision: { status: "denied", code: "MANDATE_MISMATCH", detail: "observer role is read-only" },
+      };
+    }
     const view = detail.latestMandates
       .filter(({ mandate }) => mandate.actorPeerId === credentials.peer.id && (!input.mandateId || mandate.mandateId === input.mandateId))
       .sort((left, right) => right.mandate.revision - left.mandate.revision)[0];
     if (!view) return { status: "denied", decision: { status: "denied", code: "MANDATE_MISMATCH" } };
     const signedMandate = this.openMandate(view, detail);
+    const activeRoles = new Map(detail.members
+      .filter(({ membership }) => !membership.leftAt)
+      .map(({ membership }) => [membership.peerId, membership.role]));
+    const mandateParties = [
+      signedMandate.mandate.actorPeerId,
+      signedMandate.mandate.principalPeerId,
+      signedMandate.mandate.issuedByPeerId,
+    ];
+    if (mandateParties.some((peerId) => !activeRoles.has(peerId) || activeRoles.get(peerId) === "observer")) {
+      return {
+        status: "denied",
+        decision: {
+          status: "denied",
+          code: "MANDATE_MISMATCH",
+          detail: "mandate parties must remain active non-observer members",
+        },
+      };
+    }
     if (view.revocation) {
       verifyRevocation(view.revocation, detail);
       return { status: "denied", decision: { status: "denied", code: "MANDATE_ENDED", detail: "revoked" } };
@@ -726,8 +794,13 @@ export class WorkroomClient {
 
   private async decryptEvent(record: WorkroomEventRecord, detail: WorkroomDetail): Promise<DecryptedWorkroomEvent> {
     const credentials = this.dependencies.credentials();
-    const actor = detail.members.find(({ membership }) => membership.peerId === record.event.actorPeerId)?.peer
-      ?? await this.dependencies.request<PublicPeer>(`/v1/peers/${record.event.actorPeerId}/keys`);
+    const membershipSnapshot = exactEventMembershipSnapshot(record);
+    const legacyAuditOnly = isLegacyAuditOnlyWorkroomEvent(record);
+    const historicalActor = membershipSnapshot?.find(({ peerId }) => peerId === record.event.actorPeerId);
+    const currentActor = detail.members.find(({ membership }) => membership.peerId === record.event.actorPeerId)?.peer;
+    const actor = historicalActor?.signingPublicKey && historicalActor.encryptionPublicKey
+      ? publicPeerFromEventSnapshot(historicalActor, currentActor)
+      : currentActor ?? await this.dependencies.request<PublicPeer>(`/v1/peers/${record.event.actorPeerId}/keys`);
     if (!actor) throw new Error("WORKROOM_EVENT_ACTOR_MISSING");
     const content = workroomContentPayloadSchema.parse(decryptWorkroomPayload({
       envelope: record.event.envelope,
@@ -741,9 +814,25 @@ export class WorkroomClient {
       && content.threadId !== record.event.threadId) {
       throw new Error("WORKROOM_THREAD_MISMATCH");
     }
-    validateWorkroomContentRouting(content, exactActiveMemberPeers(detail).map(routingPeer), record.event.actorPeerId);
+    if (membershipSnapshot) {
+      validateWorkroomContentRouting(
+        content,
+        membershipSnapshot.map(eventSnapshotRoutingPeer),
+        record.event.actorPeerId,
+        { allowObserverTargets: true },
+      );
+    }
     validateProjectionBinding(record.projection, content);
-    const routing = resolveWorkroomRouting(content, credentials.peer.id, record.event.actorPeerId);
+    const historicalRecipientRole = membershipSnapshot
+      ?.find(({ peerId }) => peerId === credentials.peer.id)?.role;
+    const routing = resolveWorkroomRouting(
+      content,
+      credentials.peer.id,
+      record.event.actorPeerId,
+      legacyAuditOnly || detail.membership.role === "observer" || historicalRecipientRole === "observer"
+        ? "observer"
+        : detail.membership.role,
+    );
     return {
       ...record,
       actor,
@@ -760,6 +849,23 @@ export class WorkroomClient {
     maxAttempts: number,
     signal?: AbortSignal,
   ): Promise<WorkroomEventPage> {
+    const page = await this.readRawEventPage(workroomId, afterSequence, limit, maxAttempts, signal);
+    const detail = await this.get(workroomId, afterSequence, 1);
+    const events: DecryptedWorkroomEvent[] = [];
+    for (const record of page.records) {
+      throwIfAborted(signal);
+      events.push(await this.decryptEvent(record, detail));
+    }
+    return { events, nextAfterSequence: page.nextAfterSequence };
+  }
+
+  private async readRawEventPage(
+    workroomId: string,
+    afterSequence: number,
+    limit: number,
+    maxAttempts: number,
+    signal?: AbortSignal,
+  ): Promise<{ records: WorkroomEventRecord[]; nextAfterSequence: number | null }> {
     const cursor = Number.isSafeInteger(afterSequence) && afterSequence >= 0 ? afterSequence : 0;
     const pageSize = Math.max(1, Math.min(Number.isSafeInteger(limit) ? limit : 100, 500));
     const query = new URLSearchParams({ afterSequence: String(cursor), limit: String(pageSize) });
@@ -768,13 +874,95 @@ export class WorkroomClient {
       maxAttempts,
       signal,
     );
-    const detail = await this.get(workroomId, cursor, 1);
-    const events: DecryptedWorkroomEvent[] = [];
-    for (const record of page.events) {
-      throwIfAborted(signal);
-      events.push(await this.decryptEvent(record, detail));
-    }
-    return { events, nextAfterSequence: page.nextAfterSequence };
+    const records = validateRawWorkroomEventPage(workroomId, cursor, page);
+    return { records, nextAfterSequence: page.nextAfterSequence };
+  }
+
+  private async quarantineLegacyEvent(record: WorkroomEventRecord): Promise<WorkroomEventFailureState> {
+    let failure!: WorkroomEventFailureState;
+    const updatedAt = new Date().toISOString();
+    const failureKey = workroomEventProcessingId(record);
+    await this.dependencies.mutateRuntimeState((state) => {
+      state.workroomEventFailures ??= {};
+      state.workroomCursors ??= {};
+      state.processedWorkroomEvents ??= {};
+      failure = {
+        workroomId: record.event.workroomId,
+        eventId: record.event.eventId,
+        envelopeId: record.event.envelope.envelopeId,
+        sequence: record.sequence,
+        attempts: 0,
+        reason: "legacy_audit_only",
+        lastError: "Legacy event has no complete event-time recipient-key binding",
+        status: "quarantined",
+        updatedAt,
+      };
+      delete state.workroomEventFailures[failureKey];
+      state.workroomEventFailures[failureKey] = { ...failure };
+      state.workroomCursors[record.event.workroomId] = record.sequence;
+      state.processedWorkroomEvents[failureKey] = true;
+      pruneRuntimeEventState(state);
+    });
+    return failure;
+  }
+
+  private async recordEventFailure(
+    record: WorkroomEventRecord,
+    error: unknown,
+    maximumAttempts: number,
+  ): Promise<WorkroomEventFailureState> {
+    let failure!: WorkroomEventFailureState;
+    const updatedAt = new Date().toISOString();
+    const failureKey = workroomEventProcessingId(record);
+    await this.dependencies.mutateRuntimeState((state) => {
+      state.workroomEventFailures ??= {};
+      const previous = state.workroomEventFailures[failureKey];
+      const attempts = previous?.reason === "processing_failed"
+        && previous.workroomId === record.event.workroomId
+        && previous.sequence === record.sequence
+        ? previous.attempts + 1
+        : 1;
+      failure = {
+        workroomId: record.event.workroomId,
+        eventId: record.event.eventId,
+        envelopeId: record.event.envelope.envelopeId,
+        sequence: record.sequence,
+        attempts,
+        reason: "processing_failed",
+        lastError: eventFailureMessage(error),
+        status: attempts >= maximumAttempts ? "quarantined" : "retrying",
+        updatedAt,
+      };
+      delete state.workroomEventFailures[failureKey];
+      state.workroomEventFailures[failureKey] = { ...failure };
+      if (failure.status === "quarantined") {
+        state.workroomCursors ??= {};
+        state.processedWorkroomEvents ??= {};
+        state.workroomCursors[record.event.workroomId] = record.sequence;
+        state.processedWorkroomEvents[failureKey] = true;
+      }
+      pruneRuntimeEventState(state);
+    });
+    return failure;
+  }
+
+  private async clearEventFailure(record: WorkroomEventRecord): Promise<void> {
+    const failureKey = workroomEventProcessingId(record);
+    if (!this.dependencies.runtimeState().workroomEventFailures?.[failureKey]) return;
+    await this.dependencies.mutateRuntimeState((state) => {
+      if (state.workroomEventFailures) delete state.workroomEventFailures[failureKey];
+    });
+  }
+
+  private async commitEventCursor(record: WorkroomEventRecord): Promise<void> {
+    const processingId = workroomEventProcessingId(record);
+    await this.dependencies.mutateRuntimeState((state) => {
+      state.workroomCursors ??= {};
+      state.processedWorkroomEvents ??= {};
+      state.workroomCursors[record.event.workroomId] = record.sequence;
+      state.processedWorkroomEvents[processingId] = true;
+      pruneRuntimeEventState(state);
+    });
   }
 
   private openMandate(view: WorkroomMandateView, detail: WorkroomDetail): SignedMandate {
@@ -1019,6 +1207,72 @@ export class WorkroomClient {
   }
 }
 
+function eventFailureMessage(error: unknown): string {
+  const message = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+  return message.slice(0, 512);
+}
+
+function workroomEventProcessingId(record: WorkroomEventRecord): string {
+  return record.event.envelope.envelopeId;
+}
+
+function workroomEventWasProcessed(state: AgentRuntimeState, record: WorkroomEventRecord): boolean {
+  const processed = state.processedWorkroomEvents ?? {};
+  return Boolean(processed[workroomEventProcessingId(record)]);
+}
+
+function validateRawWorkroomEventPage(
+  workroomId: string,
+  cursor: number,
+  page: { events: WorkroomEventRecord[]; nextAfterSequence: number | null },
+): WorkroomEventRecord[] {
+  if (!Array.isArray(page.events)) throw new Error("WORKROOM_EVENT_PAGE_INVALID");
+  let previousSequence = cursor;
+  const records = page.events.map((record) => {
+    if (!record || typeof record !== "object") throw new Error("WORKROOM_EVENT_METADATA_INVALID");
+    if (!Number.isSafeInteger(record.sequence) || record.sequence <= previousSequence) {
+      throw new Error("WORKROOM_EVENT_SEQUENCE_INVALID");
+    }
+    let event: AppendWorkroomEvent;
+    try {
+      event = appendWorkroomEventSchema.parse(record.event);
+    } catch {
+      throw new Error("WORKROOM_EVENT_METADATA_INVALID");
+    }
+    if (event.workroomId !== workroomId || event.envelope.workroomId !== workroomId) {
+      throw new Error("WORKROOM_EVENT_PAGE_WORKROOM_MISMATCH");
+    }
+    if (event.envelope.senderPeerId !== event.actorPeerId
+      || event.envelope.createdAt !== event.createdAt) {
+      throw new Error("WORKROOM_EVENT_METADATA_MISMATCH");
+    }
+    previousSequence = record.sequence;
+    return { ...record, event };
+  });
+  if (page.nextAfterSequence !== null
+    && (!Number.isSafeInteger(page.nextAfterSequence)
+      || records.length === 0
+      || page.nextAfterSequence !== records.at(-1)!.sequence)) {
+    throw new Error("WORKROOM_EVENT_CURSOR_INVALID");
+  }
+  return records;
+}
+
+function pruneRuntimeEventState(state: AgentRuntimeState): void {
+  if (state.processedWorkroomEvents) {
+    const processedIds = Object.keys(state.processedWorkroomEvents);
+    for (let index = 0; index < processedIds.length - MAX_PROCESSED_WORKROOM_EVENTS; index += 1) {
+      delete state.processedWorkroomEvents[processedIds[index]!];
+    }
+  }
+  if (state.workroomEventFailures) {
+    const failureIds = Object.keys(state.workroomEventFailures);
+    for (let index = 0; index < failureIds.length - MAX_WORKROOM_EVENT_FAILURES; index += 1) {
+      delete state.workroomEventFailures[failureIds[index]!];
+    }
+  }
+}
+
 function exactActiveMemberPeers(detail: WorkroomDetail): PublicPeer[] {
   const peers = detail.members.filter(({ membership }) => !membership.leftAt).map(({ membership, peer }) => {
     if (!peer || peer.status !== "ACTIVE") throw new Error("WORKROOM_MEMBER_KEY_MISSING");
@@ -1040,6 +1294,84 @@ function routingPeer(peer: PublicPeer) {
     handle: peer.handle,
     type: peer.type,
     status: "ACTIVE" as const,
+  };
+}
+
+function exactActiveRoutingPeers(detail: WorkroomDetail) {
+  const peers = new Map(exactActiveMemberPeers(detail).map((peer) => [peer.id, peer]));
+  return detail.members
+    .filter(({ membership }) => !membership.leftAt)
+    .map(({ membership }) => {
+      const peer = peers.get(membership.peerId);
+      if (!peer) throw new Error("WORKROOM_ROUTING_MEMBER_INVALID");
+      return { ...routingPeer(peer), role: membership.role };
+    });
+}
+
+function exactEventMembershipSnapshot(
+  record: WorkroomEventRecord,
+): WorkroomEventMembershipSnapshot[] | undefined {
+  if (!record.membershipSnapshot) return undefined;
+  const snapshot = workroomEventMembershipSnapshotSchema.array().min(1).max(1_000).parse(record.membershipSnapshot);
+  const peerIds = snapshot.map(({ peerId }) => peerId);
+  if (new Set(peerIds).size !== peerIds.length
+    || !peerIds.includes(record.event.actorPeerId)
+    || snapshot.some(({ signingPublicKey, encryptionPublicKey }) => Boolean(signingPublicKey) !== Boolean(encryptionPublicKey))) {
+    throw new Error("WORKROOM_EVENT_MEMBERSHIP_SNAPSHOT_INVALID");
+  }
+  if (record.event.envelope.cipherSuite === "ATALK_GROUP_BOX_V1") {
+    const recipients = record.event.envelope.wrappedKeys.map(({ recipientPeerId }) => recipientPeerId);
+    if (!sameSet(peerIds, recipients)) throw new Error("WORKROOM_EVENT_MEMBERSHIP_SNAPSHOT_MISMATCH");
+    const members = new Map(snapshot.map((member) => [member.peerId, member]));
+    const hashes = record.event.envelope.wrappedKeys.map(({ recipientEncryptionKeyHash }) =>
+      recipientEncryptionKeyHash);
+    if (!hashes.every((hash) => hash === undefined) && record.event.envelope.wrappedKeys.some((wrapped) => {
+      const encryptionPublicKey = members.get(wrapped.recipientPeerId)?.encryptionPublicKey;
+      return !encryptionPublicKey
+        || wrapped.recipientEncryptionKeyHash !== hashBase64UrlPayload(encryptionPublicKey);
+    })) {
+      throw new Error("WORKROOM_EVENT_RECIPIENT_KEY_MISMATCH");
+    }
+  }
+  return snapshot;
+}
+
+function isLegacyAuditOnlyWorkroomEvent(record: WorkroomEventRecord): boolean {
+  if (!record.membershipSnapshot) return true;
+  return record.event.envelope.cipherSuite === "ATALK_GROUP_BOX_V1"
+    && record.event.envelope.wrappedKeys.every(({ recipientEncryptionKeyHash }) =>
+      recipientEncryptionKeyHash === undefined);
+}
+
+function eventSnapshotRoutingPeer(snapshot: WorkroomEventMembershipSnapshot) {
+  return {
+    id: snapshot.peerId,
+    handle: snapshot.handle,
+    type: snapshot.peerType,
+    status: "ACTIVE" as const,
+    role: snapshot.role,
+  };
+}
+
+function publicPeerFromEventSnapshot(
+  snapshot: WorkroomEventMembershipSnapshot,
+  current: PublicPeer | null | undefined,
+): PublicPeer {
+  if (!snapshot.signingPublicKey || !snapshot.encryptionPublicKey) {
+    throw new Error("WORKROOM_EVENT_ACTOR_KEYS_MISSING");
+  }
+  return {
+    ...(current ?? {
+      displayName: snapshot.handle.slice(1),
+      publicDiscoverable: false,
+      organizationDiscoverable: false,
+    }),
+    id: snapshot.peerId,
+    type: snapshot.peerType,
+    status: "ACTIVE",
+    handle: snapshot.handle,
+    signingPublicKey: snapshot.signingPublicKey,
+    encryptionPublicKey: snapshot.encryptionPublicKey,
   };
 }
 

@@ -114,6 +114,8 @@ def test_workroom_helpers_preserve_structured_routing_and_plan_context():
     assert "Compare sources" in rendered_plan
     assert "Contact customer" not in rendered_plan
     assert "Old work" not in rendered_plan
+    directed = {"directedToMe": True, "routing": {"directedToMe": True}}
+    assert _should_dispatch_workroom_event(directed) is True
     assert _response_mentions({
         "actor": {
             "id": "11111111-1111-4111-8111-111111111111",

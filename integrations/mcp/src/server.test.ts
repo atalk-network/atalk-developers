@@ -3,6 +3,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createAtalkMcpServer, type AtalkMcpRuntime } from "./server.js";
 
 class FakeAgent {
+  constructor(private readonly workroomRole: "contributor" | "observer" = "contributor") {}
+
   connected = true;
   peer = { id: "11111111-1111-4111-8111-111111111111", handle: "@agent.test" };
   publications: unknown[] = [];
@@ -11,11 +13,12 @@ class FakeAgent {
     get: async (workroomId: string) => ({
       workroom: { id: workroomId, status: "executing" },
       descriptor: { version: 1, objective: "Prepare the launch brief" },
-      membership: { role: "contributor", joinedAt: "2026-09-03T00:00:00.000Z" },
+      membership: { role: this.workroomRole, joinedAt: "2026-09-03T00:00:00.000Z" },
       members: [], threads: [], latestMandates: [], approvals: [],
     }),
     poll: async (_workroomId: string, handler: (event: ReturnType<typeof workroomEvent>) => void) => {
       handler(workroomEvent(false, "general"));
+      handler(workroomEvent(true, "inconsistent", false));
       handler(workroomEvent(true, "targeted"));
       return 2;
     },
@@ -44,7 +47,10 @@ describe("aTalk MCP Task tools", () => {
 
   it("exposes permission-aware task tools and routes messages through the execution boundary", async () => {
     const agent = new FakeAgent();
-    runtime = createAtalkMcpServer({ agent: agent as unknown as import("@atalk/sdk").Agent });
+    runtime = createAtalkMcpServer({
+      allowWorkroomAudit: true,
+      agent: agent as unknown as import("@atalk/sdk").Agent,
+    });
     client = new Client({ name: "atalk-mcp-test", version: "1.0.0" });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     await runtime.server.connect(serverTransport);
@@ -60,6 +66,8 @@ describe("aTalk MCP Task tools", () => {
       "atalk_workroom_submit_file",
       "atalk_workroom_read_attachment",
     ]));
+    expect(tools.tools.map(({ name }) => name)).not.toContain("atalk_workroom_upload");
+    expect(tools.tools.map(({ name }) => name)).not.toContain("atalk_workroom_save_attachment");
 
     const opened = await client.callTool({
       name: "atalk_workroom_open",
@@ -74,6 +82,7 @@ describe("aTalk MCP Task tools", () => {
     });
     expect(JSON.stringify(received.content)).toContain("targeted");
     expect(JSON.stringify(received.content)).not.toContain("general");
+    expect(JSON.stringify(received.content)).not.toContain("inconsistent");
 
     const audited = await client.callTool({
       name: "atalk_workroom_audit",
@@ -112,9 +121,84 @@ describe("aTalk MCP Task tools", () => {
       }),
     })]);
   });
+
+  it("keeps operator audit and unsafe Task I/O hidden without explicit opt-in", async () => {
+    runtime = createAtalkMcpServer({ agent: new FakeAgent() as unknown as import("@atalk/sdk").Agent });
+    client = new Client({ name: "atalk-mcp-test", version: "1.0.0" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await runtime.server.connect(serverTransport);
+    await client.connect(clientTransport);
+
+    const tools = await client.listTools();
+    expect(tools.tools.map(({ name }) => name)).toContain("atalk_workroom_receive");
+    expect(tools.tools.map(({ name }) => name)).not.toContain("atalk_workroom_audit");
+    expect(tools.tools.map(({ name }) => name)).not.toContain("atalk_workroom_upload");
+    expect(tools.tools.map(({ name }) => name)).not.toContain("atalk_workroom_save_attachment");
+
+    await expect(client.callTool({
+      name: "atalk_workroom_audit",
+      arguments: {
+        workroomId: "33333333-3333-4333-8333-333333333333",
+        afterSequence: 0,
+        limit: 100,
+      },
+    })).rejects.toThrow(/not found/iu);
+    await expect(client.callTool({
+      name: "atalk_workroom_upload",
+      arguments: {
+        workroomId: "33333333-3333-4333-8333-333333333333",
+        filePath: "/tmp/not-read.txt",
+      },
+    })).rejects.toThrow(/not found/iu);
+    await expect(client.callTool({
+      name: "atalk_workroom_save_attachment",
+      arguments: { descriptor: {} },
+    })).rejects.toThrow(/not found/iu);
+  });
+
+  it("exposes low-level Task attachment I/O only with trusted/manual opt-in", async () => {
+    runtime = createAtalkMcpServer({
+      allowUnsafeWorkroomIo: true,
+      agent: new FakeAgent() as unknown as import("@atalk/sdk").Agent,
+    });
+    client = new Client({ name: "atalk-mcp-test", version: "1.0.0" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await runtime.server.connect(serverTransport);
+    await client.connect(clientTransport);
+
+    const tools = await client.listTools();
+    expect(tools.tools.map(({ name }) => name)).toEqual(expect.arrayContaining([
+      "atalk_workroom_upload",
+      "atalk_workroom_save_attachment",
+    ]));
+  });
+
+  it("does not discard a poll result when a separately read role is stale", async () => {
+    runtime = createAtalkMcpServer({
+      agent: new FakeAgent("observer") as unknown as import("@atalk/sdk").Agent,
+    });
+    client = new Client({ name: "atalk-mcp-test", version: "1.0.0" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await runtime.server.connect(serverTransport);
+    await client.connect(clientTransport);
+
+    const received = await client.callTool({
+      name: "atalk_workroom_receive",
+      arguments: { workroomId: "33333333-3333-4333-8333-333333333333", limit: 100 },
+    });
+    const content = received.content[0];
+    expect(content?.type).toBe("text");
+    const payload = JSON.parse(content && "text" in content ? content.text : "{}") as {
+      cursor?: number;
+      events?: unknown[];
+    };
+    expect(payload.cursor).toBe(2);
+    expect(payload.events).toHaveLength(1);
+    expect(JSON.stringify(payload.events)).toContain("targeted");
+  });
 });
 
-function workroomEvent(directedToMe: boolean, body: string) {
+function workroomEvent(directedToMe: boolean, body: string, routingDirectedToMe = directedToMe) {
   return {
     sequence: body === "general" ? 1 : 2,
     event: {
@@ -141,7 +225,7 @@ function workroomEvent(directedToMe: boolean, body: string) {
       }] : [],
     },
     routing: {
-      directedToMe,
+      directedToMe: routingDirectedToMe,
       directMentions: directedToMe ? [{
         peerId: "11111111-1111-4111-8111-111111111111",
         handle: "@agent.test",

@@ -11,6 +11,8 @@ type MessageHandler = (message: IncomingMessage) => void | Promise<void>;
 type ErrorHandler = (error: Error) => void;
 
 class FakeAgent {
+  constructor(private readonly workroomRole: "contributor" | "observer" = "contributor") {}
+
   connected = false;
   peer = {
     id: "00000000-0000-4000-8000-000000000001",
@@ -29,16 +31,25 @@ class FakeAgent {
   workroomActions: Array<{ kind: string; input: Record<string, unknown> }> = [];
   workrooms = {
     list: async () => ({ workrooms: [{ workroom: { id: "00000000-0000-4000-8000-000000000010" } }], nextCursor: null }),
-    get: async (id: string) => ({ workroom: { id }, members: [], threads: [], latestMandates: [], approvals: [] }),
-    poll: async (_id: string, handler: (event: { directedToMe: boolean; marker: string }) => void) => {
-      handler({ directedToMe: false, marker: "general" });
-      handler({ directedToMe: true, marker: "targeted" });
+    get: async (id: string) => ({
+      workroom: { id }, membership: { role: this.workroomRole },
+      members: [], threads: [], latestMandates: [], approvals: [],
+      events: [{ marker: "must-stay-private" }], nextAfterSequence: 9,
+    }),
+    poll: async (_id: string, handler: (event: {
+      directedToMe: boolean;
+      routing: { directedToMe: boolean };
+      marker: string;
+    }) => void) => {
+      handler({ directedToMe: false, routing: { directedToMe: false }, marker: "general" });
+      handler({ directedToMe: true, routing: { directedToMe: false }, marker: "inconsistent" });
+      handler({ directedToMe: true, routing: { directedToMe: true }, marker: "targeted" });
       return 7;
     },
     readAuditEvents: async () => ({
       events: [
-        { directedToMe: false, marker: "general" },
-        { directedToMe: true, marker: "targeted" },
+        { directedToMe: false, routing: { directedToMe: false }, marker: "general" },
+        { directedToMe: true, routing: { directedToMe: true }, marker: "targeted" },
       ],
       nextAfterSequence: null,
     }),
@@ -271,20 +282,28 @@ describe("aTalk Gateway", () => {
   });
 
   it("exposes only directed Workroom events by default and keeps an explicit audit view", async () => {
-    const runtime = createAtalkGateway({ host: "127.0.0.1", port: 0, agent: asAgent(new FakeAgent()) });
+    const runtime = createAtalkGateway({
+      host: "127.0.0.1",
+      port: 0,
+      allowWorkroomAudit: true,
+      agent: asAgent(new FakeAgent()),
+    });
     await runtime.start();
     try {
       const listed = await fetch(`${runtime.url}/v1/workrooms`).then((response) => response.json()) as {
         workrooms: Array<{ workroom: { id: string } }>;
       };
       const id = listed.workrooms[0]!.workroom.id;
+      const opened = await fetch(`${runtime.url}/v1/workrooms/${id}`).then((response) => response.json()) as Record<string, unknown>;
+      expect(opened).not.toHaveProperty("events");
+      expect(opened).not.toHaveProperty("nextAfterSequence");
       const received = await fetch(`${runtime.url}/v1/workrooms/${id}/events`).then((response) => response.json()) as {
         events: Array<{ directedToMe: boolean; marker: string }>;
         cursor: number;
         scope: string;
       };
       expect(received).toEqual({
-        events: [{ directedToMe: true, marker: "targeted" }],
+        events: [{ directedToMe: true, routing: { directedToMe: true }, marker: "targeted" }],
         cursor: 7,
         scope: "directed",
       });
@@ -294,6 +313,132 @@ describe("aTalk Gateway", () => {
       expect(audit.events.map(({ marker }) => marker)).toEqual(["general", "targeted"]);
 
       expect((await fetch(`${runtime.url}/v1/workrooms/${id}/events?scope=everything`)).status).toBe(400);
+    } finally {
+      await runtime.stop();
+    }
+  });
+
+  it("keeps complete Workroom audit disabled without operator opt-in", async () => {
+    const runtime = createAtalkGateway({ host: "127.0.0.1", port: 0, agent: asAgent(new FakeAgent()) });
+    await runtime.start();
+    try {
+      const opened = await fetch(`${runtime.url}/v1/workrooms/00000000-0000-4000-8000-000000000010`)
+        .then((response) => response.json()) as Record<string, unknown>;
+      expect(opened).not.toHaveProperty("events");
+      expect(opened).not.toHaveProperty("nextAfterSequence");
+      const response = await fetch(
+        `${runtime.url}/v1/workrooms/00000000-0000-4000-8000-000000000010/events?scope=audit&afterSequence=0`,
+      );
+      expect(response.status).toBe(403);
+      await expect(response.json()).resolves.toMatchObject({
+        error: {
+          code: "WORKROOM_AUDIT_DISABLED",
+        },
+      });
+    } finally {
+      await runtime.stop();
+    }
+  });
+
+  it("denies unsafe Workroom I/O and omits it from OpenAPI by default", async () => {
+    const runtime = createAtalkGateway({ host: "127.0.0.1", port: 0, agent: asAgent(new FakeAgent()) });
+    await runtime.start();
+    const workroomId = "00000000-0000-4000-8000-000000000010";
+    const threadId = "00000000-0000-4000-8000-000000000020";
+    try {
+      const attempts = [
+        fetch(`${runtime.url}/v1/workrooms/${workroomId}/events`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ threadId, payload: { version: 1, kind: "message" } }),
+        }),
+        fetch(`${runtime.url}/v1/workrooms/${workroomId}/attachments?name=raw.txt`, {
+          method: "POST", headers: { "content-type": "text/plain" }, body: "raw",
+        }),
+        fetch(`${runtime.url}/v1/workrooms/${workroomId}/attachments/download`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ descriptor: { id: "id", name: "raw.txt", mimeType: "text/plain", size: 1 } }),
+        }),
+      ];
+      for (const attempt of attempts) {
+        const response = await attempt;
+        expect(response.status).toBe(403);
+        await expect(response.json()).resolves.toMatchObject({
+          error: { code: "UNSAFE_WORKROOM_IO_DISABLED" },
+        });
+      }
+
+      const specification = await fetch(`${runtime.url}/openapi.json`).then((response) => response.json()) as {
+        paths: Record<string, Record<string, unknown>>;
+      };
+      expect(specification.paths[`/v1/workrooms/{workroomId}/events`]).not.toHaveProperty("post");
+      expect(specification.paths).not.toHaveProperty("/v1/workrooms/{workroomId}/attachments");
+      expect(specification.paths).not.toHaveProperty("/v1/workrooms/{workroomId}/attachments/download");
+      expect(specification.paths).toHaveProperty("/v1/workrooms/{workroomId}/execute");
+      expect(specification.paths).toHaveProperty("/v1/workrooms/{workroomId}/attachments/submit");
+      expect(specification.paths).toHaveProperty("/v1/workrooms/{workroomId}/attachments/read");
+    } finally {
+      await runtime.stop();
+    }
+  });
+
+  it("exposes unsafe Workroom compatibility I/O only with explicit opt-in", async () => {
+    const runtime = createAtalkGateway({
+      host: "127.0.0.1", port: 0, allowUnsafeWorkroomIo: true, agent: asAgent(new FakeAgent()),
+    });
+    await runtime.start();
+    const workroomId = "00000000-0000-4000-8000-000000000010";
+    const threadId = "00000000-0000-4000-8000-000000000020";
+    try {
+      const publication = await fetch(`${runtime.url}/v1/workrooms/${workroomId}/events`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          threadId,
+          payload: { version: 1, kind: "message", threadId, body: "manual", mentions: [] },
+        }),
+      });
+      expect(publication.status).toBe(201);
+
+      const upload = await fetch(`${runtime.url}/v1/workrooms/${workroomId}/attachments?name=raw.txt`, {
+        method: "POST", headers: { "content-type": "text/plain" }, body: "x",
+      });
+      expect(upload.status).toBe(201);
+
+      const download = await fetch(`${runtime.url}/v1/workrooms/${workroomId}/attachments/download`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ descriptor: { id: "id", name: "raw.txt", mimeType: "text/plain", size: 1 } }),
+      });
+      expect(download.status).toBe(200);
+      expect(new Uint8Array(await download.arrayBuffer())).toEqual(new Uint8Array([9]));
+
+      const specification = await fetch(`${runtime.url}/openapi.json`).then((response) => response.json()) as {
+        paths: Record<string, Record<string, unknown>>;
+      };
+      expect(specification.paths[`/v1/workrooms/{workroomId}/events`]).toHaveProperty("post");
+      expect(specification.paths).toHaveProperty("/v1/workrooms/{workroomId}/attachments");
+      expect(specification.paths).toHaveProperty("/v1/workrooms/{workroomId}/attachments/download");
+    } finally {
+      await runtime.stop();
+    }
+  });
+
+  it("does not discard a poll result when a separately read role is stale", async () => {
+    const runtime = createAtalkGateway({
+      host: "127.0.0.1", port: 0, agent: asAgent(new FakeAgent("observer")),
+    });
+    await runtime.start();
+    try {
+      const response = await fetch(
+        `${runtime.url}/v1/workrooms/00000000-0000-4000-8000-000000000010/events`,
+      ).then((value) => value.json());
+      expect(response).toEqual({
+        events: [{ directedToMe: true, routing: { directedToMe: true }, marker: "targeted" }],
+        cursor: 7,
+        scope: "directed",
+      });
     } finally {
       await runtime.stop();
     }

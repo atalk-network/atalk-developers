@@ -1,6 +1,14 @@
 import { GATEWAY_SPEC, MAX_ATTACHMENT_BYTES } from "./constants.js";
 
-export function gatewayOpenApiDocument(serverUrl = "http://127.0.0.1:8788") {
+export interface GatewayOpenApiOptions {
+  /** Include trusted/manual Workroom routes that do not enforce agent mandates. */
+  allowUnsafeWorkroomIo?: boolean;
+}
+
+export function gatewayOpenApiDocument(
+  serverUrl = "http://127.0.0.1:8788",
+  options: GatewayOpenApiOptions = {},
+) {
   const error = {
     description: "Gateway error",
     content: { "application/json": { schema: { $ref: "#/components/schemas/Error" } } },
@@ -138,14 +146,15 @@ export function gatewayOpenApiDocument(serverUrl = "http://127.0.0.1:8788") {
       "/v1/workrooms/{workroomId}": {
         get: {
           operationId: "getWorkroom",
+          description: "Open verified Task metadata. Event bodies are omitted; use the directed event endpoint or the explicitly enabled audit scope.",
           parameters: [{ $ref: "#/components/parameters/WorkroomId" }],
-          responses: { "200": { description: "Workroom, threads, members, mandates and approvals" }, "401": error, "404": error },
+          responses: { "200": { description: "Workroom, threads, members, mandates and approvals, without event bodies" }, "401": error, "404": error },
         },
       },
       "/v1/workrooms/{workroomId}/events": {
         get: {
           operationId: "receiveWorkroomEvents",
-          description: "By default, durably decrypt and return only events explicitly directed to this agent. scope=audit is a stateless operator view of all events and must not drive an agent loop.",
+          description: "By default, durably decrypt and return only events explicitly directed to this agent. scope=audit is a stateless operator view of all events, requires explicit gateway opt-in, and must not drive an agent loop.",
           parameters: [
             { $ref: "#/components/parameters/WorkroomId" },
             { name: "limit", in: "query", schema: { type: "integer", minimum: 1, maximum: 500, default: 100 } },
@@ -154,7 +163,7 @@ export function gatewayOpenApiDocument(serverUrl = "http://127.0.0.1:8788") {
           ],
           responses: { "200": { description: "Directed automation events, or complete events when audit scope is explicit" }, "400": error, "401": error, "404": error },
         },
-        post: {
+        ...(options.allowUnsafeWorkroomIo ? { post: {
           operationId: "publishWorkroomEvent",
           description: "Low-level encrypted publication for trusted/manual clients. Agent runtimes should use /execute so the current signed agent permission is enforced.",
           parameters: [{ $ref: "#/components/parameters/WorkroomId" }],
@@ -163,7 +172,7 @@ export function gatewayOpenApiDocument(serverUrl = "http://127.0.0.1:8788") {
             idempotencyKey: { type: "string" }, projection: { type: "object" },
           } } } } },
           responses: { "201": { description: "Encrypted event accepted" }, "400": error, "401": error, "404": error },
-        },
+        } } : {}),
       },
       "/v1/workrooms/{workroomId}/execute": {
         post: {
@@ -187,7 +196,7 @@ export function gatewayOpenApiDocument(serverUrl = "http://127.0.0.1:8788") {
           },
         },
       },
-      "/v1/workrooms/{workroomId}/attachments": {
+      ...(options.allowUnsafeWorkroomIo ? { "/v1/workrooms/{workroomId}/attachments": {
         post: {
           operationId: "uploadWorkroomAttachment",
           parameters: [
@@ -197,15 +206,15 @@ export function gatewayOpenApiDocument(serverUrl = "http://127.0.0.1:8788") {
           requestBody: { required: true, content: { "application/octet-stream": { schema: { type: "string", contentEncoding: "binary", maxLength: MAX_ATTACHMENT_BYTES } } } },
           responses: { "201": { description: "Encrypted group-scoped attachment descriptor" }, "400": error, "401": error, "413": error },
         },
-      },
-      "/v1/workrooms/{workroomId}/attachments/download": {
+      } } : {}),
+      ...(options.allowUnsafeWorkroomIo ? { "/v1/workrooms/{workroomId}/attachments/download": {
         post: {
           operationId: "downloadWorkroomAttachment",
           parameters: [{ $ref: "#/components/parameters/WorkroomId" }],
           requestBody: { required: true, content: { "application/json": { schema: { type: "object", required: ["descriptor"], properties: { descriptor: { type: "object" } } } } } },
           responses: { "200": { description: "Authenticated decrypted attachment bytes" }, "400": error, "401": error, "404": error },
         },
-      },
+      } } : {}),
       "/v1/workrooms/{workroomId}/attachments/submit": {
         post: {
           operationId: "submitMandatedWorkroomAttachment",

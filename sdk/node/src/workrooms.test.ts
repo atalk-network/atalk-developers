@@ -1,7 +1,12 @@
-import { encryptWorkroomPayload, generateIdentityKeys, hashCanonical } from "@atalk/protocol";
+import {
+  encryptWorkroomPayload,
+  generateIdentityKeys,
+  hashCanonical,
+  signWorkroomEncryptedEnvelope,
+} from "@atalk/protocol";
 import { describe, expect, it, vi } from "vitest";
 import type { AgentCredentials } from "./credential-store.js";
-import type { AgentRuntimeState } from "./runtime-state-store.js";
+import { MemoryRuntimeStateStore, type AgentRuntimeState } from "./runtime-state-store.js";
 import { approvalRequestId, defaultWorkroomAction, WorkroomClient, workroomStopReason } from "./workrooms.js";
 
 const WORKROOM_ID = "11111111-1111-4111-8111-111111111111";
@@ -9,11 +14,87 @@ const THREAD_ID = "22222222-2222-4222-8222-222222222222";
 const AGENT_ID = "33333333-3333-4333-8333-333333333333";
 const SECOND_AGENT_ID = "88888888-8888-4888-8888-888888888888";
 const SENDER_ID = "44444444-4444-4444-8444-444444444444";
+const MANAGER_ID = "99999999-9999-4999-8999-999999999999";
 const EVENT_ID = "55555555-5555-4555-8555-555555555555";
 const PLAN_ID = "77777777-7777-4777-8777-777777777777";
 const NOW = "2026-09-03T12:00:00.000Z";
 
 describe("WorkroomClient durable polling", () => {
+  it("denies mandate execution while the current membership is observer", async () => {
+    const keys = generateIdentityKeys();
+    const credentials = {
+      sessionToken: "observer-token",
+      peer: peer(AGENT_ID, "@observer.agent", "AGENT", keys),
+      keys,
+    } satisfies AgentCredentials;
+    const client = new WorkroomClient({
+      credentials: () => credentials,
+      runtimeState,
+    } as never);
+    vi.spyOn(client, "get").mockResolvedValue({
+      workroom: { status: "executing" },
+      membership: { role: "observer" },
+    } as never);
+    const effect = vi.fn(async () => ({ value: "must not run" }));
+
+    await expect(client.executeMandatedAction({ workroomId: WORKROOM_ID } as never, effect)).resolves.toEqual({
+      status: "denied",
+      decision: { status: "denied", code: "MANDATE_MISMATCH", detail: "observer role is read-only" },
+    });
+    expect(effect).not.toHaveBeenCalled();
+  });
+
+  it("denies a current mandate when any mandate party is observer or no longer active", async () => {
+    const keys = generateIdentityKeys();
+    const credentials = {
+      sessionToken: "party-role-token",
+      peer: peer(AGENT_ID, "@worker.agent", "AGENT", keys),
+      keys,
+    } satisfies AgentCredentials;
+    const parties = {
+      actor: AGENT_ID,
+      principal: SENDER_ID,
+      issuer: MANAGER_ID,
+    } as const;
+    const scenarios = Object.entries(parties).flatMap(([name, peerId]) => [
+      { name: `${name} observer`, peerId, observer: true },
+      { name: `${name} removed`, peerId, observer: false },
+    ]);
+
+    for (const scenario of scenarios) {
+      const baseMembers = [
+        { membership: { peerId: AGENT_ID, role: "contributor" } },
+        { membership: { peerId: SENDER_ID, role: "owner" } },
+        { membership: { peerId: MANAGER_ID, role: "supervisor" } },
+      ];
+      const members = scenario.observer
+        ? baseMembers.map((member) => member.membership.peerId === scenario.peerId
+          ? { membership: { ...member.membership, role: "observer" } }
+          : member)
+        : baseMembers.filter((member) => member.membership.peerId !== scenario.peerId);
+      const client = new WorkroomClient({ credentials: () => credentials, runtimeState } as never);
+      vi.spyOn(client, "get").mockResolvedValue({
+        workroom: { status: "executing" },
+        membership: { role: scenario.peerId === AGENT_ID && scenario.observer ? "observer" : "contributor" },
+        members,
+        latestMandates: [{ mandate: { actorPeerId: AGENT_ID, revision: 1 } }],
+      } as never);
+      Reflect.set(client, "openMandate", vi.fn(() => ({
+        mandate: {
+          actorPeerId: AGENT_ID,
+          principalPeerId: SENDER_ID,
+          issuedByPeerId: MANAGER_ID,
+        },
+      })));
+
+      const result = await client.guardMandateUse({ workroomId: WORKROOM_ID } as never);
+      expect(result, scenario.name).toMatchObject({
+        status: "denied",
+        decision: { status: "denied", code: "MANDATE_MISMATCH" },
+      });
+    }
+  });
+
   it("commits only after successful authenticated handling and deduplicates retries", async () => {
     const agentKeys = generateIdentityKeys();
     const senderKeys = generateIdentityKeys();
@@ -45,7 +126,10 @@ describe("WorkroomClient durable polling", () => {
       },
       senderSigningSecretKey: senderKeys.signingSecretKey,
       senderEncryptionSecretKey: senderKeys.encryptionSecretKey,
-      recipients: [{ peerId: AGENT_ID, encryptionPublicKey: agentKeys.encryptionPublicKey }],
+      recipients: [agentPeer, senderPeer].map(({ id, encryptionPublicKey }) => ({
+        peerId: id,
+        encryptionPublicKey,
+      })),
       createdAt: NOW,
     });
     const descriptorEnvelope = encryptWorkroomPayload({
@@ -56,15 +140,18 @@ describe("WorkroomClient durable polling", () => {
       payload: { version: 1, title: "Vendor comparison", objective: "Compare three vendors" },
       senderSigningSecretKey: senderKeys.signingSecretKey,
       senderEncryptionSecretKey: senderKeys.encryptionSecretKey,
-      recipients: [{ peerId: AGENT_ID, encryptionPublicKey: agentKeys.encryptionPublicKey }],
+      recipients: [agentPeer, senderPeer].map(({ id, encryptionPublicKey }) => ({
+        peerId: id,
+        encryptionPublicKey,
+      })),
       createdAt: NOW,
     });
     const detail = {
       workroom: { id: WORKROOM_ID, currentKeyEpoch: 1, descriptorEnvelope, descriptorHash: hashCanonical(descriptorEnvelope) },
       membership: { peerId: AGENT_ID, role: "contributor" },
       members: [
-        { membership: { peerId: AGENT_ID, peerType: "AGENT" }, peer: agentPeer },
-        { membership: { peerId: SENDER_ID, peerType: "HUMAN" }, peer: senderPeer },
+        { membership: { peerId: AGENT_ID, peerType: "AGENT", role: "contributor" }, peer: agentPeer },
+        { membership: { peerId: SENDER_ID, peerType: "HUMAN", role: "owner" }, peer: senderPeer },
       ],
       threads: [], latestMandates: [], approvals: [], latestReceiptHash: null,
     };
@@ -76,9 +163,13 @@ describe("WorkroomClient durable polling", () => {
         idempotencyKey: "message-event-1", createdAt: NOW,
       },
       projection: { kind: "plan", id: PLAN_ID, version: 1 },
+      membershipSnapshot: [
+        eventMember(agentPeer, "contributor", agentKeys),
+        eventMember(senderPeer, "owner", senderKeys),
+      ],
     };
     const request = vi.fn(async (path: string) => path.includes("/events?")
-      ? { events: [record], nextAfterSequence: null }
+      ? { events: path.includes("afterSequence=1") ? [] : [record], nextAfterSequence: null }
       : detail);
     const client = new WorkroomClient({
       request,
@@ -90,6 +181,7 @@ describe("WorkroomClient durable polling", () => {
 
     await expect(client.poll(WORKROOM_ID, () => { throw new Error("consumer failed"); })).rejects.toThrow("consumer failed");
     expect(runtime.workroomCursors?.[WORKROOM_ID]).toBeUndefined();
+    expect(runtime.workroomEventFailures ?? {}).toEqual({});
 
     const handler = vi.fn();
     await expect(client.poll(WORKROOM_ID, handler)).resolves.toBe(1);
@@ -118,6 +210,12 @@ describe("WorkroomClient durable polling", () => {
     const recipients = [
       { peerId: AGENT_ID, encryptionPublicKey: firstKeys.encryptionPublicKey },
       { peerId: SECOND_AGENT_ID, encryptionPublicKey: secondKeys.encryptionPublicKey },
+      { peerId: SENDER_ID, encryptionPublicKey: senderKeys.encryptionPublicKey },
+    ];
+    const eventSnapshot = [
+      eventMember(firstPeer, "contributor", firstKeys),
+      eventMember(secondPeer, "contributor", secondKeys),
+      eventMember(senderPeer, "owner", senderKeys),
     ];
     const descriptorEnvelope = encryptWorkroomPayload({
       envelopeId: "66666666-6666-4666-8666-666666666666",
@@ -164,17 +262,20 @@ describe("WorkroomClient durable polling", () => {
         senderId: AGENT_ID,
         senderKeys: firstKeys,
       }),
-    ];
+    ].map((record) => ({ ...record, membershipSnapshot: eventSnapshot }));
     const members = [
-      { membership: { peerId: AGENT_ID, peerType: "AGENT" }, peer: firstPeer },
-      { membership: { peerId: SECOND_AGENT_ID, peerType: "AGENT" }, peer: secondPeer },
-      { membership: { peerId: SENDER_ID, peerType: "HUMAN" }, peer: senderPeer },
+      { membership: { peerId: AGENT_ID, peerType: "AGENT", role: "contributor" }, peer: firstPeer },
+      { membership: { peerId: SECOND_AGENT_ID, peerType: "AGENT", role: "contributor" }, peer: secondPeer },
+      { membership: { peerId: SENDER_ID, peerType: "HUMAN", role: "owner" }, peer: senderPeer },
     ];
     const makeClient = (
       credentials: AgentCredentials,
       runtime: AgentRuntimeState,
       memberList = members,
-      eventRecords = records,
+      eventRecords: Array<Omit<(typeof records)[number], "membershipSnapshot"> & {
+        membershipSnapshot?: ReturnType<typeof eventMember>[];
+      }> = records,
+      ownRole: "contributor" | "observer" = "contributor",
     ) => {
       const detail = {
         workroom: {
@@ -183,14 +284,19 @@ describe("WorkroomClient durable polling", () => {
           descriptorEnvelope,
           descriptorHash: hashCanonical(descriptorEnvelope),
         },
-        membership: { peerId: credentials.peer.id, role: "contributor" },
+        membership: { peerId: credentials.peer.id, role: ownRole },
         members: memberList,
         threads: [], latestMandates: [], approvals: [], latestReceiptHash: null,
       };
       return new WorkroomClient({
-        request: vi.fn(async (path: string) => path.includes("/events?")
-          ? { events: eventRecords, nextAfterSequence: null }
-          : detail),
+        request: vi.fn(async (path: string) => {
+          if (!path.includes("/events?")) return detail;
+          const afterSequence = Number(new URL(path, "https://sdk.invalid").searchParams.get("afterSequence") ?? 0);
+          return {
+            events: eventRecords.filter(({ sequence }) => sequence > afterSequence),
+            nextAfterSequence: null,
+          };
+        }),
         credentials: () => credentials,
         runtimeState: () => runtime,
         mutateRuntimeState: async (mutator: (state: AgentRuntimeState) => void) => mutator(runtime),
@@ -230,14 +336,17 @@ describe("WorkroomClient durable polling", () => {
       peerId: AGENT_ID, handle: "@worker.one", peerType: "AGENT", intent: "direct",
     }])).rejects.toThrow("WORKROOM_SELF_DIRECTION_FORBIDDEN");
 
-    const mismatched = workroomMessageRecord({
-      sequence: 5,
-      eventId: "99999999-9999-4999-8999-999999999995",
-      body: "Tampered routing identity",
-      mentions: [{ peerId: AGENT_ID, handle: "@worker.two", peerType: "AGENT", intent: "direct" }],
-      recipients,
-      senderKeys,
-    });
+    const mismatched = {
+      ...workroomMessageRecord({
+        sequence: 5,
+        eventId: "99999999-9999-4999-8999-999999999995",
+        body: "Tampered routing identity",
+        mentions: [{ peerId: AGENT_ID, handle: "@worker.two", peerType: "AGENT", intent: "direct" }],
+        recipients,
+        senderKeys,
+      }),
+      membershipSnapshot: eventSnapshot,
+    };
     const invalidClient = makeClient(
       { sessionToken: "one", peer: firstPeer, keys: firstKeys },
       runtimeState(),
@@ -247,17 +356,47 @@ describe("WorkroomClient durable polling", () => {
     await expect(invalidClient.readAuditEvents(WORKROOM_ID)).rejects
       .toThrow("WORKROOM_ROUTING_IDENTITY_MISMATCH");
 
-    const inconsistentMemberClient = makeClient(
-      { sessionToken: "one", peer: firstPeer, keys: firstKeys },
-      runtimeState(),
-      [
-        { membership: { peerId: AGENT_ID, peerType: "HUMAN" }, peer: firstPeer },
-        members[2]!,
-      ],
-      [records[0]!],
+    const { membershipSnapshot: _legacySnapshot, ...legacyRecord } = records[1]!;
+    const legacyRuntime = runtimeState();
+    const legacyClient = makeClient(
+      { sessionToken: "legacy", peer: firstPeer, keys: firstKeys },
+      legacyRuntime,
+      members,
+      [legacyRecord],
     );
-    await expect(inconsistentMemberClient.readAuditEvents(WORKROOM_ID)).rejects
-      .toThrow("WORKROOM_ROUTING_MEMBER_INVALID");
+    const legacyHandler = vi.fn();
+    await legacyClient.poll(WORKROOM_ID, legacyHandler);
+    expect(legacyHandler).not.toHaveBeenCalled();
+    expect(legacyRuntime.workroomCursors?.[WORKROOM_ID]).toBe(2);
+    await expect(legacyClient.readAuditEvents(WORKROOM_ID)).resolves.toMatchObject({
+      events: [{ directedToMe: false, content: { body: "Only the first worker should act" } }],
+    });
+
+    const boundEnvelope = records[1]!.event.envelope;
+    if (boundEnvelope.cipherSuite !== "ATALK_GROUP_BOX_V1") throw new Error("expected group box");
+    const { senderSignature: _signature, ...unsignedBoundEnvelope } = boundEnvelope;
+    const allMissingEnvelope = signWorkroomEncryptedEnvelope({
+      ...unsignedBoundEnvelope,
+      wrappedKeys: unsignedBoundEnvelope.wrappedKeys.map(({
+        recipientEncryptionKeyHash: _recipientKeyHash,
+        ...wrapped
+      }) => wrapped),
+    }, senderKeys.signingSecretKey);
+    const nMinusOneRecord = {
+      ...records[1]!,
+      event: { ...records[1]!.event, envelope: allMissingEnvelope },
+    };
+    const nMinusOneRuntime = runtimeState();
+    const nMinusOneClient = makeClient(
+      { sessionToken: "n-minus-one", peer: firstPeer, keys: firstKeys },
+      nMinusOneRuntime,
+      members,
+      [nMinusOneRecord],
+    );
+    const nMinusOneHandler = vi.fn();
+    await nMinusOneClient.poll(WORKROOM_ID, nMinusOneHandler);
+    expect(nMinusOneHandler).not.toHaveBeenCalled();
+    expect(nMinusOneRuntime.workroomCursors?.[WORKROOM_ID]).toBe(2);
 
     const singletonRuntime = runtimeState();
     const singleton = makeClient(
@@ -270,6 +409,249 @@ describe("WorkroomClient durable polling", () => {
     await singleton.poll(WORKROOM_ID, singletonHandler);
     expect(singletonHandler).not.toHaveBeenCalled();
     expect(singletonRuntime.workroomCursors?.[WORKROOM_ID]).toBe(1);
+
+    const observerMembers = members.map((member) => member.membership.peerId === AGENT_ID
+      ? { ...member, membership: { ...member.membership, role: "observer" as const } }
+      : member);
+    const observerRuntime = runtimeState();
+    const observer = makeClient(
+      { sessionToken: "observer", peer: firstPeer, keys: firstKeys },
+      observerRuntime,
+      observerMembers,
+      [records[1]!],
+      "observer",
+    );
+    const observerHandler = vi.fn();
+    await observer.poll(WORKROOM_ID, observerHandler);
+    expect(observerHandler).not.toHaveBeenCalled();
+    expect(observerRuntime.workroomCursors?.[WORKROOM_ID]).toBe(2);
+    await expect(observer.readAuditEvents(WORKROOM_ID)).resolves.toMatchObject({
+      events: [{ directedToMe: false, routing: { directedToMe: false } }],
+    });
+
+    const publisher = makeClient(
+      { sessionToken: "publisher", peer: secondPeer, keys: secondKeys },
+      runtimeState(),
+      observerMembers,
+      [],
+    );
+    await expect(publisher.message(WORKROOM_ID, THREAD_ID, "Observer must not execute", [{
+      peerId: AGENT_ID, handle: "@worker.one", peerType: "AGENT", intent: "direct",
+    }])).rejects.toThrow("WORKROOM_ROUTING_TARGET_NOT_EXECUTABLE");
+
+    const historicalRecipients = recipients;
+    const historicalRecord = {
+      ...workroomMessageRecord({
+        sequence: 5,
+        eventId: "99999999-9999-4999-8999-999999999995",
+        body: "This was valid before worker one left",
+        mentions: [{ peerId: AGENT_ID, handle: "@worker.one", peerType: "AGENT", intent: "direct" }],
+        recipients: historicalRecipients,
+        senderKeys,
+      }),
+      membershipSnapshot: [
+        eventMember(firstPeer, "contributor", firstKeys),
+        eventMember(secondPeer, "contributor", secondKeys),
+        eventMember(senderPeer, "owner", senderKeys),
+      ],
+    };
+    const remainingRuntime = runtimeState();
+    const remainingMember = makeClient(
+      { sessionToken: "remaining", peer: secondPeer, keys: secondKeys },
+      remainingRuntime,
+      [members[1]!, members[2]!],
+      [historicalRecord],
+    );
+    const remainingHandler = vi.fn();
+    await remainingMember.poll(WORKROOM_ID, remainingHandler);
+    expect(remainingHandler).not.toHaveBeenCalled();
+    expect(remainingRuntime.workroomCursors?.[WORKROOM_ID]).toBe(5);
+    await expect(remainingMember.readAuditEvents(WORKROOM_ID)).resolves.toMatchObject({
+      events: [{ content: { body: "This was valid before worker one left" } }],
+    });
+
+    const promotedRuntime = runtimeState();
+    const promoted = makeClient(
+      { sessionToken: "promoted", peer: firstPeer, keys: firstKeys },
+      promotedRuntime,
+      members,
+      [{
+        ...historicalRecord,
+        membershipSnapshot: historicalRecord.membershipSnapshot.map((snapshot) =>
+          snapshot.peerId === AGENT_ID ? { ...snapshot, role: "observer" as const } : snapshot),
+      }],
+    );
+    const promotedHandler = vi.fn();
+    await promoted.poll(WORKROOM_ID, promotedHandler);
+    expect(promotedHandler).not.toHaveBeenCalled();
+    expect(promotedRuntime.workroomCursors?.[WORKROOM_ID]).toBe(5);
+  });
+
+  it("durably quarantines a poisoned event after bounded retries and continues after restart", async () => {
+    const agentKeys = generateIdentityKeys();
+    const senderKeys = generateIdentityKeys();
+    const agentPeer = peer(AGENT_ID, "@worker.agent", "AGENT", agentKeys);
+    const senderPeer = peer(SENDER_ID, "@task.owner", "HUMAN", senderKeys);
+    const credentials: AgentCredentials = { sessionToken: "token", peer: agentPeer, keys: agentKeys };
+    const recipients = [agentPeer, senderPeer].map(({ id, encryptionPublicKey }) => ({
+      peerId: id,
+      encryptionPublicKey,
+    }));
+    const snapshot = [
+      eventMember(agentPeer, "contributor", agentKeys),
+      eventMember(senderPeer, "owner", senderKeys),
+    ];
+    const validPoisonPayload = workroomMessageRecord({
+      sequence: 1,
+      eventId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1",
+      body: "This ciphertext claims the wrong kind",
+      mentions: [{ peerId: AGENT_ID, handle: "@worker.agent", peerType: "AGENT", intent: "direct" }],
+      recipients,
+      senderKeys,
+    });
+    const poison = {
+      ...validPoisonPayload,
+      event: { ...validPoisonPayload.event, kind: "activity" as const },
+      membershipSnapshot: snapshot,
+    };
+    const later = {
+      ...workroomMessageRecord({
+        sequence: 2,
+        eventId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa2",
+        body: "This directed event must still run",
+        mentions: [{ peerId: AGENT_ID, handle: "@worker.agent", peerType: "AGENT", intent: "direct" }],
+        recipients,
+        senderKeys,
+      }),
+      membershipSnapshot: snapshot,
+    };
+    const detail = {
+      workroom: { id: WORKROOM_ID, currentKeyEpoch: 1 },
+      membership: { peerId: AGENT_ID, role: "contributor" },
+      members: [
+        { membership: { peerId: AGENT_ID, peerType: "AGENT", role: "contributor" }, peer: agentPeer },
+        { membership: { peerId: SENDER_ID, peerType: "HUMAN", role: "owner" }, peer: senderPeer },
+      ],
+      threads: [], latestMandates: [], approvals: [], latestReceiptHash: null,
+    };
+    const makeClient = (
+      runtime: AgentRuntimeState,
+      eventRecords: Array<typeof poison | typeof later> = [poison, later],
+      nextAfterSequence: number | null = null,
+    ) => {
+      const client = new WorkroomClient({
+        request: vi.fn(async () => ({ events: eventRecords, nextAfterSequence })),
+        credentials: () => credentials,
+        runtimeState: () => runtime,
+        mutateRuntimeState: async (mutator: (state: AgentRuntimeState) => void) => mutator(runtime),
+        uploadPart: vi.fn(), deletePart: vi.fn(), downloadAttachment: vi.fn(), downloadAttachmentTo: vi.fn(),
+      } as never);
+      vi.spyOn(client, "get").mockResolvedValue(detail as never);
+      return client;
+    };
+
+    const beforeRestart = runtimeState();
+    const firstClient = makeClient(beforeRestart);
+    const handlerBeforeRestart = vi.fn();
+    await expect(firstClient.poll(WORKROOM_ID, handlerBeforeRestart)).rejects
+      .toThrow("WORKROOM_EVENT_KIND_MISMATCH");
+    await expect(firstClient.poll(WORKROOM_ID, handlerBeforeRestart)).rejects
+      .toThrow("WORKROOM_EVENT_KIND_MISMATCH");
+    expect(handlerBeforeRestart).not.toHaveBeenCalled();
+    expect(beforeRestart.workroomCursors?.[WORKROOM_ID]).toBeUndefined();
+    expect(beforeRestart.workroomEventFailures?.[poison.event.eventId]).toMatchObject({
+      attempts: 2,
+      status: "retrying",
+    });
+
+    const stateStore = new MemoryRuntimeStateStore();
+    await stateStore.save(beforeRestart);
+    const afterRestart = await stateStore.load();
+    if (!afterRestart) throw new Error("runtime state was not persisted");
+    const renamedPoison = {
+      ...poison,
+      event: {
+        ...poison.event,
+        eventId: "abababab-abab-4bab-8bab-abababababab",
+        idempotencyKey: "renamed-poison",
+      },
+    };
+    const restartedClient = makeClient(afterRestart, [renamedPoison, later]);
+    const handlerAfterRestart = vi.fn();
+    const quarantined = vi.fn();
+
+    await expect(restartedClient.poll(WORKROOM_ID, handlerAfterRestart, {
+      onEventQuarantined: quarantined,
+    })).resolves.toBe(2);
+    expect(handlerAfterRestart).toHaveBeenCalledTimes(1);
+    expect(handlerAfterRestart).toHaveBeenCalledWith(expect.objectContaining({
+      event: expect.objectContaining({ eventId: later.event.eventId }),
+      directedToMe: true,
+    }));
+    expect(quarantined).toHaveBeenCalledWith(expect.objectContaining({
+      eventId: renamedPoison.event.eventId,
+      envelopeId: poison.event.envelope.envelopeId,
+      attempts: 3,
+      status: "quarantined",
+    }));
+    expect(afterRestart.workroomCursors?.[WORKROOM_ID]).toBe(2);
+    expect(restartedClient.listQuarantinedEvents(WORKROOM_ID)).toEqual([
+      expect.objectContaining({
+        eventId: renamedPoison.event.eventId,
+        envelopeId: poison.event.envelope.envelopeId,
+        attempts: 3,
+        status: "quarantined",
+      }),
+    ]);
+    await expect(restartedClient.readAuditEvents(WORKROOM_ID)).rejects
+      .toThrow("WORKROOM_EVENT_KIND_MISMATCH");
+
+    const otherWorkroomId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const crossWorkroom = {
+      ...later,
+      event: {
+        ...later.event,
+        workroomId: otherWorkroomId,
+        envelope: { ...later.event.envelope, workroomId: otherWorkroomId },
+      },
+    };
+    const mismatchedTimestamp = {
+      ...later,
+      event: { ...later.event, createdAt: "2026-09-03T12:00:01.000Z" },
+    };
+    const invalidPages = [
+      { records: [crossWorkroom], next: null, code: "WORKROOM_EVENT_PAGE_WORKROOM_MISMATCH" },
+      { records: [later, later], next: null, code: "WORKROOM_EVENT_SEQUENCE_INVALID" },
+      { records: [{ ...later, sequence: 2 }, { ...poison, sequence: 1 }], next: null,
+        code: "WORKROOM_EVENT_SEQUENCE_INVALID" },
+      { records: [mismatchedTimestamp], next: null, code: "WORKROOM_EVENT_METADATA_MISMATCH" },
+      { records: [later], next: 99, code: "WORKROOM_EVENT_CURSOR_INVALID" },
+    ];
+    for (const invalid of invalidPages) {
+      const invalidRuntime = runtimeState();
+      const invalidClient = makeClient(invalidRuntime, invalid.records, invalid.next);
+      await expect(invalidClient.poll(WORKROOM_ID, vi.fn())).rejects.toThrow(invalid.code);
+      expect(invalidRuntime.workroomCursors).toEqual({});
+      expect(invalidRuntime.workroomEventFailures).toEqual({});
+    }
+
+    const renamedReplay = {
+      ...later,
+      sequence: 3,
+      event: {
+        ...later.event,
+        eventId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+        idempotencyKey: "renamed-by-relay",
+      },
+    };
+    const replayRuntime = runtimeState();
+    const replayClient = makeClient(replayRuntime, [later, renamedReplay]);
+    const replayHandler = vi.fn();
+    await expect(replayClient.poll(WORKROOM_ID, replayHandler)).resolves.toBe(3);
+    expect(replayHandler).toHaveBeenCalledTimes(1);
+    expect(replayRuntime.workroomCursors?.[WORKROOM_ID]).toBe(3);
+    expect(replayRuntime.processedWorkroomEvents?.[later.event.envelope.envelopeId]).toBe(true);
+    expect(replayRuntime.processedWorkroomEvents?.[renamedReplay.event.eventId]).toBeUndefined();
   });
 
   it("uses the app's granular action vocabulary and reserves derived control events", () => {
@@ -336,6 +718,22 @@ function runtimeState(): AgentRuntimeState {
     counterparties: {},
     workroomCursors: {},
     processedWorkroomEvents: {},
+    workroomEventFailures: {},
+  };
+}
+
+function eventMember(
+  value: ReturnType<typeof peer>,
+  role: "owner" | "contributor" | "observer",
+  keys: ReturnType<typeof generateIdentityKeys>,
+) {
+  return {
+    peerId: value.id,
+    peerType: value.type,
+    role,
+    handle: value.handle,
+    signingPublicKey: keys.signingPublicKey,
+    encryptionPublicKey: keys.encryptionPublicKey,
   };
 }
 

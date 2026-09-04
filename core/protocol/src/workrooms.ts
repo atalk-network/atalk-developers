@@ -63,7 +63,27 @@ export interface WorkroomRoutingPeer {
   handle: string;
   type: "HUMAN" | "AGENT";
   status: "ACTIVE";
+  /** Optional for source compatibility; current SDKs always provide it. */
+  role?: WorkroomMemberRole;
 }
+
+export interface WorkroomRoutingValidationOptions {
+  /** Accept a legacy/history target but never classify it as executable. */
+  allowObserverTargets?: boolean;
+}
+
+/**
+ * Immutable membership/identity view captured when the relay accepts an
+ * event. Legacy rows do not manufacture this snapshot and remain audit-only.
+ */
+export const workroomEventMembershipSnapshotSchema = z.object({
+  peerId: uuid,
+  peerType: z.enum(["HUMAN", "AGENT"] as const),
+  role: z.enum(WORKROOM_MEMBER_ROLES),
+  handle: z.string().regex(/^@[a-z0-9][a-z0-9._-]{1,62}$/u),
+  signingPublicKey: base64Url,
+  encryptionPublicKey: base64Url,
+}).strict();
 
 export const workroomApproverRoleSchema = z.enum(WORKROOM_APPROVER_ROLES);
 
@@ -102,6 +122,8 @@ const encryptedEnvelopeBaseSchema = z.object({
 
 const wrappedWorkroomKeySchema = z.object({
   recipientPeerId: uuid,
+  /** SHA-512 of the exact X25519 public key used for this key wrap. */
+  recipientEncryptionKeyHash: base64Url.optional(),
   nonce: base64Url,
   ciphertext: base64Url,
 }).strict();
@@ -413,6 +435,7 @@ export type WorkroomThread = z.infer<typeof workroomThreadSchema>;
 export type WorkroomContentPayload = z.infer<typeof workroomContentPayloadSchema>;
 export type WorkroomPlanStep = z.infer<typeof workroomPlanStepSchema>;
 export type AppendWorkroomEvent = z.infer<typeof appendWorkroomEventSchema>;
+export type WorkroomEventMembershipSnapshot = z.infer<typeof workroomEventMembershipSnapshotSchema>;
 export type WorkroomApprovalDecisionPayload = z.infer<typeof workroomApprovalDecisionPayloadSchema>;
 export type SignedWorkroomApprovalDecision = z.infer<typeof signedWorkroomApprovalDecisionSchema>;
 export type WorkroomMembershipConsentPayload = z.infer<typeof workroomMembershipConsentPayloadSchema>;
@@ -439,6 +462,7 @@ export function validateWorkroomContentRouting(
   content: WorkroomContentPayload,
   activePeers: readonly WorkroomRoutingPeer[],
   actorPeerId: string,
+  options: WorkroomRoutingValidationOptions = {},
 ): void {
   const peers = new Map<string, WorkroomRoutingPeer>();
   for (const peer of activePeers) {
@@ -461,6 +485,9 @@ export function validateWorkroomContentRouting(
     if (peer.handle !== mention.handle || peer.type !== mention.peerType) {
       throw new Error("WORKROOM_ROUTING_IDENTITY_MISMATCH");
     }
+    if (mention.intent === "direct" && peer.role === "observer" && !options.allowObserverTargets) {
+      throw new Error("WORKROOM_ROUTING_TARGET_NOT_EXECUTABLE");
+    }
   }
 
   if (content.kind !== "plan") return;
@@ -469,7 +496,11 @@ export function validateWorkroomContentRouting(
     for (const peerId of step.assignedPeerIds) {
       if (assigned.has(peerId)) throw new Error("WORKROOM_ROUTING_DUPLICATE_TARGET");
       assigned.add(peerId);
-      if (!peers.has(peerId)) throw new Error("WORKROOM_ROUTING_TARGET_NOT_ACTIVE");
+      const peer = peers.get(peerId);
+      if (!peer) throw new Error("WORKROOM_ROUTING_TARGET_NOT_ACTIVE");
+      if (peer.role === "observer" && !options.allowObserverTargets) {
+        throw new Error("WORKROOM_ROUTING_TARGET_NOT_EXECUTABLE");
+      }
     }
   }
 }
@@ -479,8 +510,9 @@ export function resolveWorkroomRouting(
   content: WorkroomContentPayload,
   recipientPeerId: string,
   actorPeerId: string,
+  recipientRole?: WorkroomMemberRole,
 ): WorkroomRoutingMatch {
-  if (recipientPeerId === actorPeerId) {
+  if (recipientPeerId === actorPeerId || recipientRole === "observer") {
     return { directedToMe: false, directMentions: [], assignedSteps: [] };
   }
   const directMentions = payloadMentions(content)
@@ -540,6 +572,14 @@ export function encryptWorkroomPayload(input: EncryptWorkroomPayloadInput): Work
     recipients: input.recipients,
     ...(input.randomBytes ? { randomBytes: input.randomBytes } : {}),
   });
+  const recipientKeys = new Map(input.recipients.map(({ peerId, encryptionPublicKey }) => [
+    peerId,
+    encryptionPublicKey,
+  ]));
+  const wrappedKeys = sealed.wrappedKeys.map((wrapped) => ({
+    ...wrapped,
+    recipientEncryptionKeyHash: hashBase64UrlPayload(recipientKeys.get(wrapped.recipientPeerId)!),
+  }));
   return signWorkroomEncryptedEnvelope({
     version: 1,
     cipherSuite: "ATALK_GROUP_BOX_V1",
@@ -548,6 +588,7 @@ export function encryptWorkroomPayload(input: EncryptWorkroomPayloadInput): Work
     senderPeerId: input.senderPeerId,
     keyEpoch: input.keyEpoch,
     ...sealed,
+    wrappedKeys,
     ciphertextHash: hashBase64UrlPayload(sealed.ciphertext),
     createdAt: input.createdAt,
   }, input.senderSigningSecretKey);
