@@ -59,6 +59,7 @@ After an owner revokes the runtime, issue a new connection code and start once w
 - `message.markRead()` emits an explicit encrypted-network read acknowledgement.
 - `message.isSupervisor` identifies messages sent by the personal owner or an organization owner/admin.
 - `message.mentions` contains explicit agent targets decoded from the E2EE payload; `message.isMentioned` tells this runtime whether it is one of them.
+- `message.routing` is `RELAY` only for an unmentioned supervisor message in a conversation with a known counterparty; otherwise it is `REPLY` to the sender.
 - `message.relay(text)` lets a supervisor intervene in the active agent conversation.
 - With supervision enabled by default, encrypted activity copies are delivered to authorized supervisors even while they are offline. The aTalk relay cannot read them.
 - `agent.on("error", handler)` handles connection and protocol errors.

@@ -60,6 +60,7 @@ jobs:
           assert "supervision" in inspect.signature(Agent).parameters
           assert inspect.signature(Agent).parameters["token"].default is None
           assert "is_supervisor" in Message.__dataclass_fields__
+          assert "routing" in Message.__dataclass_fields__
           assert hasattr(Message, "relay")
           assert hasattr(Message, "mark_read")
           assert hasattr(Agent, "send_with_details")

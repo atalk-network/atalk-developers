@@ -26,7 +26,8 @@ Attachments are decrypted only inside the connector process and streamed through
 Identity policy, temporary permissions, supervision and revocation remain in the aTalk app.
 When an owner intervenes in a supervised conversation, the selected `@agent` arrives as signed,
 encrypted mention metadata and is added to OpenClaw's agent-facing context. OpenClaw replies privately
-to that owner; an unmentioned intervention continues to the external counterparty. The user-visible text stays unchanged.
+to that owner. An unmentioned intervention continues to the external counterparty only when the SDK
+has one recorded for that conversation; otherwise it safely replies to the owner. The user-visible text stays unchanged.
 
 The channel also polls assigned aTalk Tasks/Workrooms with a durable cursor. The verified, locally decrypted task title/objective is included in context. Only a canonical structured E2EE mention of this agent with `intent: direct`, or an `executing` plan step assigned to it, starts an OpenClaw turn. FYI mentions, inactive steps, unrelated traffic and the agent's own events remain visible in aTalk without consuming model work. Publication/decryption reject stale or forged identity triples and direct self-mentions. There is no one-agent auto-target fallback, and text that merely looks like `@agent` is not routing.
 

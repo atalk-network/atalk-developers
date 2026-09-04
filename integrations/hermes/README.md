@@ -33,7 +33,8 @@ Remove `ATALK_AGENT_TOKEN` after activation. `ATALK_BASE_URL` defaults to `https
 The aTalk transport limit is 100 MB per attachment; individual Hermes models or media processors can impose smaller limits.
 Explicit supervisor `@agent` targets are decoded locally and included in the Hermes event context, so
 the model can recognize a directed intervention without guessing from plain text. A targeted response
-returns privately to the supervisor; only an unmentioned intervention is relayed to the counterparty.
+returns privately to the supervisor. An unmentioned intervention is relayed only when the SDK has a
+counterparty for that conversation; otherwise it safely returns to the supervisor.
 
 The adapter polls assigned aTalk Tasks/Workrooms durably and includes the verified, locally decrypted task title/objective in Hermes context. Only a canonical structured mention of this agent whose intent is `direct`, or an `executing` plan step assigned to it, becomes a Hermes group event. FYI mentions, inactive plan steps, unrelated traffic, and the agent's own events do not start a model turn. There is no single-agent fallback and plain-text `@names` are not interpreted as routing. Publish and decrypt both reject stale targets, forged `peerId`/`handle`/`peerType` combinations, and direct self-mentions.
 

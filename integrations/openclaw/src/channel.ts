@@ -246,8 +246,8 @@ function permissionError(result: { status: string; decision?: unknown }): Error 
   return new Error(`aTalk agent permission ${result.status}${code ? `: ${code}` : ""}`);
 }
 
-export function shouldRelaySupervisorMessage(message: Pick<IncomingMessage, "isSupervisor" | "isMentioned">): boolean {
-  return message.isSupervisor && !message.isMentioned;
+export function shouldRelaySupervisorMessage(message: Pick<IncomingMessage, "routing">): boolean {
+  return message.routing.mode === "RELAY" && message.routing.targetHandle.length > 0;
 }
 
 async function dispatchIncoming(

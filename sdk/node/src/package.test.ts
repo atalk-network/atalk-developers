@@ -18,6 +18,7 @@ describe("published Node SDK surface", () => {
   let directory: string | undefined;
 
   afterEach(async () => {
+    vi.useRealTimers();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
     if (directory) await rm(directory, { recursive: true, force: true });
@@ -63,6 +64,55 @@ describe("published Node SDK surface", () => {
 
   it("requires either a token or an explicit credential path", () => {
     expect(() => new FileCredentialStore()).toThrow("activation token or an explicit credential path");
+  });
+
+  it("keeps an authenticated runtime alive only through its current open socket", async () => {
+    vi.useFakeTimers();
+    const agent = new Agent({
+      credentialStore: new MemoryCredentials(),
+      runtimeStateStore: new MemoryRuntimeStateStore(),
+      supervision: false,
+    });
+    const firstSocket = {
+      readyState: 1,
+      send: vi.fn(),
+      close: vi.fn(),
+    };
+    const replacementSocket = {
+      readyState: 1,
+      send: vi.fn(),
+      close: vi.fn(),
+    };
+    const internals = agent as unknown as {
+      stopped: boolean;
+      ready: boolean;
+      socket: typeof firstSocket;
+      startHeartbeat(socket: typeof firstSocket): void;
+    };
+    internals.stopped = false;
+    internals.ready = true;
+    internals.socket = firstSocket;
+    internals.startHeartbeat(firstSocket);
+
+    await vi.advanceTimersByTimeAsync(25_000);
+    expect(firstSocket.send).toHaveBeenCalledTimes(1);
+    expect(firstSocket.send).toHaveBeenLastCalledWith(JSON.stringify({ kind: "PING" }));
+
+    internals.socket = replacementSocket;
+    internals.startHeartbeat(replacementSocket);
+    await vi.advanceTimersByTimeAsync(25_000);
+    expect(firstSocket.send).toHaveBeenCalledTimes(1);
+    expect(replacementSocket.send).toHaveBeenCalledTimes(1);
+
+    replacementSocket.readyState = 2;
+    await vi.advanceTimersByTimeAsync(25_000);
+    expect(replacementSocket.send).toHaveBeenCalledTimes(1);
+
+    replacementSocket.readyState = 1;
+    await agent.stop();
+    await vi.advanceTimersByTimeAsync(75_000);
+    expect(replacementSocket.send).toHaveBeenCalledTimes(1);
+    expect(replacementSocket.close).toHaveBeenCalledWith(1000, "Agent stopped");
   });
 
   it("persists runtime state privately", async () => {
@@ -276,6 +326,70 @@ describe("published Node SDK surface", () => {
     }));
     expect((await stateStore.load())?.outbox).toEqual([]);
     expect(frames).toContainEqual({ kind: "RECEIPT_ACK", messageId: sent.messageId, state: "DELIVERED" });
+  });
+
+  it("relays an unmentioned supervisor only when the conversation has a counterparty", async () => {
+    const agentKeys = generateIdentityKeys();
+    const supervisorKeys = generateIdentityKeys();
+    const counterpartyKeys = generateIdentityKeys();
+    const agentPeer = testPeer("00000000-0000-4000-8000-000000000015", "@receiver.routing", agentKeys);
+    const supervisor = {
+      ...testPeer("00000000-0000-4000-8000-000000000016", "@owner.routing", supervisorKeys),
+      type: "HUMAN" as const,
+    };
+    const counterparty = testPeer(
+      "00000000-0000-4000-8000-000000000017", "@counterparty.routing", counterpartyKeys,
+    );
+    const credentials: AgentCredentials = { sessionToken: "session", peer: agentPeer, keys: agentKeys };
+    const agent = new Agent({
+      credentialStore: new MemoryCredentials(credentials),
+      runtimeStateStore: new MemoryRuntimeStateStore(),
+      supervision: true,
+    });
+    const internals = agent as unknown as {
+      credentials: AgentCredentials;
+      ready: boolean;
+      socket: { readyState: number; send(value: string): void };
+      supervisors: PublicPeer[];
+      counterparties: Map<string, PublicPeer>;
+      request: (path: string) => Promise<unknown>;
+      handleFrame(frame: ServerFrame): Promise<void>;
+    };
+    internals.credentials = credentials;
+    internals.ready = true;
+    internals.socket = { readyState: 1, send: () => undefined };
+    internals.supervisors = [supervisor];
+    internals.request = async () => supervisor;
+    const routing: Array<{ mode: "REPLY" | "RELAY"; targetHandle: string }> = [];
+    agent.on("message", (message) => {
+      routing.push(message.routing);
+    });
+
+    const deliverSupervisorMessage = async (messageId: string, conversationId: string) => {
+      const envelope = encryptText({
+        messageId,
+        conversationId,
+        senderPeerId: supervisor.id,
+        recipientPeerId: agentPeer.id,
+        timestamp: "2026-09-04T12:00:00.000Z",
+        plaintext: "hello",
+        senderSigningSecretKey: supervisorKeys.signingSecretKey,
+        senderEncryptionSecretKey: supervisorKeys.encryptionSecretKey,
+        recipientEncryptionPublicKey: agentKeys.encryptionPublicKey,
+      });
+      await internals.handleFrame(serverFrameSchema.parse({ kind: "MESSAGE", envelope }));
+    };
+
+    await deliverSupervisorMessage(
+      "00000000-0000-4000-8000-000000000018",
+      "00000000-0000-4000-8000-000000000019",
+    );
+    expect(routing[0]).toEqual({ mode: "REPLY", targetHandle: supervisor.handle });
+
+    const supervisedConversationId = "00000000-0000-4000-8000-000000000020";
+    internals.counterparties.set(supervisedConversationId, counterparty);
+    await deliverSupervisorMessage("00000000-0000-4000-8000-000000000023", supervisedConversationId);
+    expect(routing[1]).toEqual({ mode: "RELAY", targetHandle: counterparty.handle });
   });
 
   it("persists access and rotated refresh credentials through the issuer hook", async () => {

@@ -1,6 +1,6 @@
 {
   "name": "@atalk/gateway",
-  "version": "0.1.0-alpha.12",
+  "version": "0.1.0-alpha.13",
   "description": "Universal local gateway for connecting any AI agent runtime to aTalk",
   "type": "module",
   "main": "./dist/index.js",

@@ -9,6 +9,7 @@ export interface SerializableMessage {
   isSupervisor: boolean;
   mentions: IncomingMessage["mentions"];
   isMentioned: boolean;
+  routing: IncomingMessage["routing"];
   attachment?: { id: string; name: string; mimeType: string; kind: "IMAGE" | "VIDEO" | "FILE"; size: number };
 }
 
@@ -58,6 +59,7 @@ export function serializeMessage(message: IncomingMessage): SerializableMessage 
     isSupervisor: message.isSupervisor,
     mentions: message.mentions ?? [],
     isMentioned: message.isMentioned ?? false,
+    routing: message.routing,
     ...(descriptor ? { attachment: {
       id: descriptor.id,
       name: descriptor.name,

@@ -5,6 +5,7 @@ import pytest
 
 from atalk.protocol import (
     b64url_decode,
+    b64url_encode,
     create_chunked_attachment_descriptor,
     decode_attachment_message,
     decrypt_attachment,
@@ -15,6 +16,7 @@ from atalk.protocol import (
     encrypt_attachment_chunk,
     encrypt_text,
     join_encrypted_attachment_parts,
+    sign_canonical,
     split_encrypted_attachment,
 )
 
@@ -62,6 +64,56 @@ def test_python_encryption_matches_typescript_golden_vector():
         recipient_encryption_public_key=vector["recipient_encryption_public_key"],
         nonce=b64url_decode(envelope["nonce"]),
     ) == envelope
+
+
+def test_python_encryption_accepts_typescript_64_byte_signing_secret():
+    vector_path = Path(__file__).parents[3] / "core" / "protocol" / "test-vectors" / "v1.json"
+    vector = json.loads(vector_path.read_text())
+    envelope = vector["envelope"]
+    typescript_secret = b64url_encode(
+        b64url_decode(vector["sender_signing_secret_seed"])
+        + b64url_decode(vector["sender_signing_public_key"])
+    )
+    assert len(b64url_decode(typescript_secret)) == 64
+    assert sign_canonical(envelope, typescript_secret) == sign_canonical(
+        envelope, vector["sender_signing_secret_seed"],
+    )
+    assert encrypt_text(
+        message_id=envelope["message_id"],
+        conversation_id=envelope["conversation_id"],
+        sender_peer_id=envelope["sender_peer_id"],
+        recipient_peer_id=envelope["recipient_peer_id"],
+        timestamp=envelope["timestamp"],
+        plaintext=vector["plaintext"],
+        sender_signing_secret_key=typescript_secret,
+        sender_encryption_secret_key=vector["sender_encryption_secret_key"],
+        recipient_encryption_public_key=vector["recipient_encryption_public_key"],
+        nonce=b64url_decode(envelope["nonce"]),
+    ) == envelope
+
+
+@pytest.mark.parametrize("secret_size", [0, 31, 33, 63, 65])
+def test_python_signing_rejects_invalid_secret_key_lengths(secret_size):
+    vector_path = Path(__file__).parents[3] / "core" / "protocol" / "test-vectors" / "v1.json"
+    vector = json.loads(vector_path.read_text())
+    envelope = vector["envelope"]
+    invalid_secret = b64url_encode(b"x" * secret_size)
+
+    with pytest.raises(ValueError, match="INVALID_SIGNING_SECRET_KEY_LENGTH"):
+        sign_canonical({"message": "invalid key"}, invalid_secret)
+    with pytest.raises(ValueError, match="INVALID_SIGNING_SECRET_KEY_LENGTH"):
+        encrypt_text(
+            message_id=envelope["message_id"],
+            conversation_id=envelope["conversation_id"],
+            sender_peer_id=envelope["sender_peer_id"],
+            recipient_peer_id=envelope["recipient_peer_id"],
+            timestamp=envelope["timestamp"],
+            plaintext=vector["plaintext"],
+            sender_signing_secret_key=invalid_secret,
+            sender_encryption_secret_key=vector["sender_encryption_secret_key"],
+            recipient_encryption_public_key=vector["recipient_encryption_public_key"],
+            nonce=b64url_decode(envelope["nonce"]),
+        )
 
 
 def test_attachment_round_trip_and_tamper_detection():

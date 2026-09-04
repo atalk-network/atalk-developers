@@ -306,7 +306,7 @@ export function gatewayOpenApiDocument(
             occurredAt: { type: "string", format: "date-time" },
             data: {
               type: "object",
-              required: ["messageId", "conversationId", "text", "sender", "isSupervisor", "mentions", "isMentioned"],
+              required: ["messageId", "conversationId", "text", "sender", "isSupervisor", "mentions", "isMentioned", "routing"],
               properties: {
                 messageId: { type: "string", format: "uuid" },
                 conversationId: { type: "string", format: "uuid" },
@@ -315,6 +315,14 @@ export function gatewayOpenApiDocument(
                 isSupervisor: { type: "boolean" },
                 mentions: { type: "array", items: { $ref: "#/components/schemas/AgentMention" } },
                 isMentioned: { type: "boolean" },
+                routing: {
+                  type: "object",
+                  required: ["mode", "targetHandle"],
+                  properties: {
+                    mode: { type: "string", enum: ["REPLY", "RELAY"] },
+                    targetHandle: { type: "string" },
+                  },
+                },
                 attachment: { type: "object" },
               },
             },

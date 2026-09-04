@@ -40,6 +40,7 @@ import { WorkroomClient } from "./workrooms.js";
 
 const MAX_PROCESSED_INCOMING = 10_000;
 const DEFAULT_REFRESH_LEEWAY_MS = 5 * 60_000;
+const HEARTBEAT_INTERVAL_MS = 25_000;
 const FATAL_SESSION_CODES = new Set([
   "AUTH_REQUIRED",
   "INVALID_REFRESH_TOKEN",
@@ -146,6 +147,8 @@ export class Agent {
   private outboxDrain: Promise<void> | undefined;
   private inboxDrain: Promise<void> | undefined;
   private inboxRetryTimer: NodeJS.Timeout | undefined;
+  private heartbeatTimer: NodeJS.Timeout | undefined;
+  private reconnectTimer: NodeJS.Timeout | undefined;
   private inboxRetryAttempt = 0;
   private readonly sentThisConnection = new Set<string>();
   private socket?: WebSocket;
@@ -202,6 +205,8 @@ export class Agent {
 
   async start(): Promise<void> {
     this.stopped = false;
+    this.stopHeartbeat();
+    this.clearReconnectTimer();
     this.inboxRetryAttempt = 0;
     this.runtimeState = (await this.runtimeStateStore.load()) ?? emptyRuntimeState();
     const persistedCredentials = await this.credentialStore.load();
@@ -227,6 +232,8 @@ export class Agent {
     this.stopped = true;
     this.ready = false;
     this.reconnectAttempt = 0;
+    this.stopHeartbeat();
+    this.clearReconnectTimer();
     if (this.inboxRetryTimer) clearTimeout(this.inboxRetryTimer);
     this.inboxRetryTimer = undefined;
     this.socket?.close(1000, "Agent stopped");
@@ -393,6 +400,7 @@ export class Agent {
             this.ready = true;
             this.reconnectAttempt = 0;
             this.sentThisConnection.clear();
+            this.startHeartbeat(socket);
             clearTimeout(timeout);
             resolve();
             void this.drainOutbox().catch((error: unknown) => this.emitError(error));
@@ -416,7 +424,11 @@ export class Agent {
       });
       socket.on("close", (code) => {
         clearTimeout(timeout);
-        if (this.socket === socket) this.ready = false;
+        if (this.socket === socket) {
+          this.ready = false;
+          delete this.socket;
+          this.stopHeartbeat();
+        }
         if (!ready) {
           const error = code === 4001 || code === 1008
             ? new AgentProtocolError("INVALID_SESSION", "Agent credentials were rejected")
@@ -434,9 +446,10 @@ export class Agent {
   }
 
   private scheduleReconnect(): void {
-    if (this.stopped) return;
+    if (this.stopped || this.reconnectTimer) return;
     const delay = reconnectDelay(this.reconnectAttempt++);
-    setTimeout(() => {
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = undefined;
       if (this.stopped) return;
       void this.connectWithRefresh().catch((error: unknown) => {
         if (isSessionError(error)) this.stopped = true;
@@ -444,6 +457,29 @@ export class Agent {
         if (!this.stopped) this.scheduleReconnect();
       });
     }, delay);
+  }
+
+  private startHeartbeat(socket: WebSocket): void {
+    this.stopHeartbeat();
+    this.heartbeatTimer = setInterval(() => {
+      if (this.stopped || !this.ready || this.socket !== socket || socket.readyState !== WebSocket.OPEN) return;
+      try {
+        socket.send(JSON.stringify({ kind: "PING" }));
+      } catch (error) {
+        this.emitError(error);
+      }
+    }, HEARTBEAT_INTERVAL_MS);
+    this.heartbeatTimer.unref();
+  }
+
+  private stopHeartbeat(): void {
+    if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
+    this.heartbeatTimer = undefined;
+  }
+
+  private clearReconnectTimer(): void {
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = undefined;
   }
 
   private async handleFrame(frame: ServerFrame): Promise<void> {
@@ -497,8 +533,8 @@ export class Agent {
     const isSupervisor = this.supervisors.some((supervisor) => supervisor.id === sender.id);
     const isMentioned = directedMessage?.mentions.some((mention) => mention.peerId === credentials.peer.id) ?? false;
     const counterparty = isSupervisor ? this.counterparties.get(frame.envelope.conversation_id) : sender;
-    const routing = isSupervisor && !isMentioned
-      ? { mode: "RELAY" as const, targetHandle: counterparty?.handle ?? "" }
+    const routing = isSupervisor && !isMentioned && counterparty
+      ? { mode: "RELAY" as const, targetHandle: counterparty.handle }
       : { mode: "REPLY" as const, targetHandle: sender.handle };
     if (!isSupervisor) {
       this.counterparties.set(frame.envelope.conversation_id, sender);

@@ -77,6 +77,7 @@ After an owner revokes the runtime, issue a new connection code and start once w
 - `agent.connected` and `agent.peer` expose current runtime state without exposing private keys.
 - `message.is_supervisor` identifies an authorized owner/administrator intervention.
 - `message.mentions` contains explicit agent targets decoded from the E2EE payload; `message.is_mentioned` tells this runtime whether it is one of them.
+- `message.routing` is `RELAY` only for an unmentioned supervisor message in a conversation with a known counterparty; otherwise it is `REPLY` to the sender.
 - `await message.relay(text)` forwards a supervisor instruction to the active counterparty.
 - `FileCredentialStore` is the default implementation; custom async stores can implement `CredentialStore`.
 

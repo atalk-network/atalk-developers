@@ -1,9 +1,11 @@
+import asyncio
 import json
 import os
 import uuid
 
 import pytest
 import atalk.agent as agent_module
+from websockets.protocol import State
 
 from atalk import (
     Agent,
@@ -29,9 +31,15 @@ from atalk.protocol import (
 class FakeSocket:
     def __init__(self):
         self.frames = []
+        self.state = State.OPEN
+        self.sent = asyncio.Event()
 
     async def send(self, value):
         self.frames.append(json.loads(value))
+        self.sent.set()
+
+    async def close(self, **_kwargs):
+        self.state = State.CLOSED
 
 
 class FakeAgent(Agent):
@@ -176,6 +184,49 @@ async def test_sends_and_mirrors_activity_then_accepts_supervisor_intervention()
 
 
 @pytest.mark.asyncio
+async def test_unmentioned_supervisor_only_relays_when_the_conversation_has_a_counterparty():
+    agent_keys = IdentityKeys.generate()
+    supervisor_keys = IdentityKeys.generate()
+    counterparty_keys = IdentityKeys.generate()
+    agent_peer = peer("AGENT", "@receiver.routing", "Receiver", agent_keys)
+    supervisor = peer("HUMAN", "@owner.routing", "Owner", supervisor_keys)
+    counterparty = peer("AGENT", "@counterparty.routing", "Counterparty", counterparty_keys)
+    runtime = FakeAgent(
+        Credentials("s" * 48, agent_peer, agent_keys),
+        {supervisor["id"]: supervisor, counterparty["id"]: counterparty},
+        {},
+    )
+    runtime._supervisors = [supervisor]
+    seen = []
+
+    @runtime.on_message
+    async def capture(message):
+        seen.append(message)
+
+    async def deliver(conversation_id):
+        envelope = encrypt_text(
+            message_id=str(uuid.uuid4()),
+            conversation_id=conversation_id,
+            sender_peer_id=supervisor["id"],
+            recipient_peer_id=agent_peer["id"],
+            timestamp="2026-09-04T12:00:00.000Z",
+            plaintext="hello",
+            sender_signing_secret_key=supervisor_keys.signing_secret_key,
+            sender_encryption_secret_key=supervisor_keys.encryption_secret_key,
+            recipient_encryption_public_key=agent_keys.encryption_public_key,
+        )
+        await runtime._handle_frame({"kind": "MESSAGE", "envelope": envelope})
+
+    await deliver(str(uuid.uuid4()))
+    assert seen[0].routing == {"mode": "REPLY", "targetHandle": supervisor["handle"]}
+
+    supervised_conversation_id = str(uuid.uuid4())
+    runtime._counterparties[supervised_conversation_id] = counterparty
+    await deliver(supervised_conversation_id)
+    assert seen[1].routing == {"mode": "RELAY", "targetHandle": counterparty["handle"]}
+
+
+@pytest.mark.asyncio
 async def test_acknowledges_receipts():
     keys = IdentityKeys.generate()
     agent_peer = peer("AGENT", "@receipt.demo", "Receipt", keys)
@@ -183,6 +234,47 @@ async def test_acknowledges_receipts():
     message_id = str(uuid.uuid4())
     await runtime._handle_frame({"kind": "RECEIPT", "messageId": message_id, "state": "DELIVERED"})
     assert runtime._socket.frames == [{"kind": "RECEIPT_ACK", "messageId": message_id, "state": "DELIVERED"}]
+
+
+@pytest.mark.asyncio
+async def test_application_heartbeat_tracks_only_the_current_open_socket_and_stops_cleanly():
+    keys = IdentityKeys.generate()
+    runtime = FakeAgent(
+        Credentials("s" * 48, peer("AGENT", "@heartbeat.demo", "Heartbeat", keys), keys), {}, {},
+    )
+    ticks = asyncio.Queue()
+
+    async def wait_for_tick():
+        await ticks.get()
+
+    runtime._wait_for_heartbeat = wait_for_tick
+    first_socket = runtime._socket
+    await runtime._start_heartbeat(first_socket)
+    first_task = runtime._heartbeat_task
+    ticks.put_nowait(None)
+    await asyncio.wait_for(first_socket.sent.wait(), timeout=1)
+    assert first_socket.frames == [{"kind": "PING"}]
+
+    replacement_socket = FakeSocket()
+    runtime._socket = replacement_socket
+    await runtime._start_heartbeat(replacement_socket)
+    assert first_task.cancelled()
+    ticks.put_nowait(None)
+    await asyncio.wait_for(replacement_socket.sent.wait(), timeout=1)
+    assert replacement_socket.frames == [{"kind": "PING"}]
+
+    replacement_socket.state = State.CLOSING
+    ticks.put_nowait(None)
+    await runtime._heartbeat_task
+    assert replacement_socket.frames == [{"kind": "PING"}]
+
+    replacement_socket.state = State.OPEN
+    await runtime._start_heartbeat(replacement_socket)
+    final_task = runtime._heartbeat_task
+    await runtime.stop()
+    assert final_task.cancelled()
+    assert runtime._heartbeat_task is None
+    assert replacement_socket.state == State.CLOSED
 
 
 @pytest.mark.asyncio

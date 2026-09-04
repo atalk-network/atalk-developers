@@ -172,9 +172,16 @@ describe("aTalk Gateway", () => {
       const received = incoming();
       fake.emitMessage(received.message);
       const events = await fetch(`${runtime.url}/v1/events`).then((response) => response.json()) as {
-        events: Array<{ type: string; data: { text: string }; actions: { reply: string } }>;
+        events: Array<{
+          type: string;
+          data: { text: string; routing: IncomingMessage["routing"] };
+          actions: { reply: string };
+        }>;
       };
-      expect(events.events[0]).toMatchObject({ type: "message.received", data: { text: "hello" } });
+      expect(events.events[0]).toMatchObject({
+        type: "message.received",
+        data: { text: "hello", routing: { mode: "REPLY", targetHandle: "@human.test" } },
+      });
 
       const replyResponse = await fetch(`${runtime.url}${events.events[0]!.actions.reply}`, {
         method: "POST",
@@ -238,7 +245,7 @@ describe("aTalk Gateway", () => {
     }
   });
 
-  it("answers an explicitly mentioned supervisor privately and preserves legacy relay behavior", async () => {
+  it("obeys the SDK routing decision for supervisor responses", async () => {
     const fake = new FakeAgent();
     const runtime = createAtalkGateway({ host: "127.0.0.1", port: 0, agent: asAgent(fake) });
     await runtime.start();
@@ -256,15 +263,36 @@ describe("aTalk Gateway", () => {
       expect(targeted.calls.reply).toEqual(["private"]);
       expect(targeted.calls.relay).toEqual([]);
 
-      const legacy = incoming({ id: "legacy-supervisor", isSupervisor: true });
-      fake.emitMessage(legacy.message);
-      const legacyEvent = await fetch(`${runtime.url}/v1/events`).then((response) => response.json()) as {
+      const fallback = incoming({
+        id: "fallback-supervisor",
+        isSupervisor: true,
+        isMentioned: false,
+        routing: { mode: "RELAY", targetHandle: "" },
+      });
+      fake.emitMessage(fallback.message);
+      const fallbackEvent = await fetch(`${runtime.url}/v1/events`).then((response) => response.json()) as {
         events: Array<{ actions: { reply: string } }>;
       };
-      await fetch(`${runtime.url}${legacyEvent.events[0]!.actions.reply}`, {
+      await fetch(`${runtime.url}${fallbackEvent.events[0]!.actions.reply}`, {
+        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ text: "fallback" }),
+      });
+      expect(fallback.calls.reply).toEqual(["fallback"]);
+      expect(fallback.calls.relay).toEqual([]);
+
+      const relayed = incoming({
+        id: "relayed-supervisor",
+        isSupervisor: true,
+        isMentioned: false,
+        routing: { mode: "RELAY", targetHandle: "@counterparty.test" },
+      });
+      fake.emitMessage(relayed.message);
+      const relayedEvent = await fetch(`${runtime.url}/v1/events`).then((response) => response.json()) as {
+        events: Array<{ actions: { reply: string } }>;
+      };
+      await fetch(`${runtime.url}${relayedEvent.events[0]!.actions.reply}`, {
         method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ text: "relay" }),
       });
-      expect(legacy.calls.relay).toEqual(["relay"]);
+      expect(relayed.calls.relay).toEqual(["relay"]);
     } finally {
       await runtime.stop();
     }

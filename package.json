@@ -1,6 +1,6 @@
 {
   "name": "atalk-developers",
-  "version": "0.1.0-alpha.12",
+  "version": "0.1.0-alpha.13",
   "private": true,
   "description": "Public protocol, Rust core, SDKs and agent integrations for aTalk encrypted Tasks",
   "packageManager": "pnpm@11.19.0",

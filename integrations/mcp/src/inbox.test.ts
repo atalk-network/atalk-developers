@@ -13,6 +13,7 @@ describe("MCP inbox serialization", () => {
       isSupervisor: false,
       mentions: [{ peerId: "44444444-4444-4444-8444-444444444444", handle: "@agent", type: "AGENT" }],
       isMentioned: true,
+      routing: { mode: "REPLY", targetHandle: "@sender" },
       attachment: {
         descriptor: {
           id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
@@ -38,5 +39,6 @@ describe("MCP inbox serialization", () => {
     expect(JSON.stringify(serialized)).not.toContain("secret-nonce");
     expect(serialized.mentions).toEqual([{ peerId: "44444444-4444-4444-8444-444444444444", handle: "@agent", type: "AGENT" }]);
     expect(serialized.isMentioned).toBe(true);
+    expect(serialized.routing).toEqual({ mode: "REPLY", targetHandle: "@sender" });
   });
 });

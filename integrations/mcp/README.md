@@ -19,8 +19,9 @@ After activation, remove `ATALK_AGENT_TOKEN`. Optional variables:
 - `ATALK_ENABLE_UNSAFE_WORKROOM_IO=true` only for trusted/manual compatibility clients; disabled by default
 
 The aTalk transport supports encrypted attachments up to 100 MB. Larger model inputs can be saved with `atalk_save_attachment` rather than inserted into model context.
-`atalk_receive` returns structured `mentions` and `isMentioned` fields for explicit supervisor targets;
-the visible `text` remains clean and does not need to be parsed for `@handles`.
+`atalk_receive` returns structured `mentions`, `isMentioned`, and `routing` fields for supervisor
+targets. Follow `routing.mode`: `REPLY` answers the supervisor, while `RELAY` continues a known
+external conversation. The visible `text` remains clean and does not need to be parsed for `@handles`.
 
 ## Tools
 

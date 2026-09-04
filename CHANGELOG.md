@@ -4,6 +4,23 @@ All notable public protocol and SDK changes are recorded here. The project follo
 
 ## Unreleased
 
+## 0.1.0-alpha.13 / 0.1.0a10 - 2026-09-04
+
+### Changed
+
+- Node and Python agent runtimes now send application-level heartbeats, keeping long-lived production
+  sessions active behind relay idle timeouts.
+- Supervisor routing is explicit across the SDKs, Gateway, OpenClaw, Hermes, MCP and the portable
+  Agent Plugin. An owner message is relayed only when the authenticated conversation has a known
+  external counterparty; a direct owner-to-agent message remains a reply to the owner.
+- Python accepts the documented 32-byte Ed25519 seed and the 64-byte Node credential representation,
+  while rejecting every other signing-key length.
+
+### Fixed
+
+- Coordinated release gates now execute the OpenClaw, MCP and Hermes integration tests before any
+  package is published.
+
 ## 0.1.0-alpha.12 / 0.1.0a9 - 2026-09-04
 
 ### Added

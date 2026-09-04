@@ -86,6 +86,7 @@ from atalk_hermes.adapter import (  # noqa: E402
     _render_workroom_event,
     _response_mentions,
     _should_dispatch_workroom_event,
+    _should_relay_message,
     _stable_uuid,
 )
 from atalk_hermes import register  # noqa: E402
@@ -154,6 +155,27 @@ def test_workroom_helpers_preserve_structured_routing_and_plan_context():
     assert _should_dispatch_workroom_event(second_agent_view) is False
     assert _should_dispatch_workroom_event(ambiguous_general_message) is False
     assert _should_dispatch_workroom_event(legacy_top_level_only) is False
+
+
+def test_direct_message_responses_obey_sdk_routing():
+    fallback_reply = types.SimpleNamespace(
+        routing={"mode": "REPLY", "targetHandle": "@owner.test"},
+        is_supervisor=True,
+        is_mentioned=False,
+    )
+    supervised_relay = types.SimpleNamespace(
+        routing={"mode": "RELAY", "targetHandle": "@counterparty.test"},
+        is_supervisor=True,
+        is_mentioned=False,
+    )
+    incomplete_relay = types.SimpleNamespace(
+        routing={"mode": "RELAY", "targetHandle": ""},
+        is_supervisor=True,
+        is_mentioned=False,
+    )
+    assert _should_relay_message(fallback_reply) is False
+    assert _should_relay_message(supervised_relay) is True
+    assert _should_relay_message(incomplete_relay) is False
 
 
 @pytest.mark.asyncio

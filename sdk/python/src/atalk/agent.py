@@ -15,6 +15,7 @@ from typing import Any, Awaitable, Callable, Literal, Protocol
 import httpx
 from websockets.asyncio.client import ClientConnection, connect
 from websockets.exceptions import ConnectionClosed
+from websockets.protocol import State
 
 from .protocol import (
     IdentityKeys,
@@ -37,6 +38,7 @@ _DIRECTED_MESSAGE_PREFIX = "__ATALK_DIRECTED_MESSAGE_V1__"
 _FATAL_SESSION_CODES = {"AUTH_REQUIRED", "INVALID_REFRESH_TOKEN", "INVALID_SESSION", "PEER_INACTIVE"}
 _MAX_PROCESSED_INCOMING = 10_000
 _DEFAULT_REFRESH_LEEWAY_SECONDS = 5 * 60
+_HEARTBEAT_INTERVAL_SECONDS = 25.0
 
 
 class AgentError(RuntimeError):
@@ -223,6 +225,7 @@ class Message:
     is_supervisor: bool
     mentions: list[dict[str, str]]
     is_mentioned: bool
+    routing: dict[str, str]
     attachment: Attachment | None
     _reply: Callable[[str], Awaitable[str]]
     _reply_attachment: Callable[[bytes, str, str, str | None], Awaitable[str]]
@@ -325,6 +328,7 @@ class Agent:
         self._processing_incoming: dict[str, asyncio.Task[None]] = {}
         self._sent_this_connection: set[str] = set()
         self._connection_task: asyncio.Task[None] | None = None
+        self._heartbeat_task: asyncio.Task[None] | None = None
         self._inbox_retry_task: asyncio.Task[None] | None = None
         self._inbox_retry_attempt = 0
         self._ready = asyncio.Event()
@@ -383,6 +387,7 @@ class Agent:
     async def stop(self) -> None:
         self._stopping = True
         self._ready.clear()
+        await self._stop_heartbeat()
         socket = self._socket
         if socket is not None:
             await socket.close(code=1000, reason="Agent stopped")
@@ -587,6 +592,7 @@ class Agent:
                                 attempt = 0
                                 self._sent_this_connection.clear()
                                 self._ready.set()
+                                await self._start_heartbeat(socket)
                                 await self._drain_outbox()
                                 await self._drain_inbox()
                                 continue
@@ -618,6 +624,7 @@ class Agent:
                         break
                     await self._emit_error(error)
                 finally:
+                    await self._stop_heartbeat()
                     self._socket = None
                     self._ready.clear()
                 if self._stopping:
@@ -629,9 +636,68 @@ class Agent:
             await self._emit_error(error)
             raise
         finally:
+            await self._stop_heartbeat()
             self._socket = None
             self._ready.clear()
             self._stopped.set()
+
+    async def _start_heartbeat(self, socket: ClientConnection) -> None:
+        await self._stop_heartbeat()
+        self._heartbeat_task = asyncio.create_task(
+            self._heartbeat_loop(socket), name="atalk-agent-heartbeat",
+        )
+
+    async def _stop_heartbeat(self) -> None:
+        task = self._heartbeat_task
+        self._heartbeat_task = None
+        if task is None or task is asyncio.current_task():
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    async def _wait_for_heartbeat(self) -> None:
+        await asyncio.sleep(_HEARTBEAT_INTERVAL_SECONDS)
+
+    async def _heartbeat_loop(self, socket: ClientConnection) -> None:
+        try:
+            while not self._stopping:
+                await self._wait_for_heartbeat()
+                if not await self._send_heartbeat(socket):
+                    return
+        except asyncio.CancelledError:
+            raise
+        except ConnectionClosed:
+            # The receive loop owns reconnect decisions and will observe the
+            # same close without emitting a duplicate error.
+            return
+        except Exception as error:
+            await self._emit_error(error)
+            try:
+                await socket.close(code=1011, reason="Heartbeat failed")
+            except Exception:
+                pass
+
+    async def _send_heartbeat(self, socket: ClientConnection) -> bool:
+        if (
+            self._stopping
+            or not self._ready.is_set()
+            or self._socket is not socket
+            or getattr(socket, "state", State.OPEN) != State.OPEN
+        ):
+            return False
+        async with self._send_lock:
+            if (
+                self._stopping
+                or not self._ready.is_set()
+                or self._socket is not socket
+                or getattr(socket, "state", State.OPEN) != State.OPEN
+            ):
+                return False
+            await socket.send(json.dumps({"kind": "PING"}))
+        return True
 
     async def _handle_frame(self, frame: dict[str, Any]) -> None:
         kind = frame.get("kind")
@@ -679,6 +745,13 @@ class Agent:
         mentions = list(directed_message["mentions"]) if directed_message else []
         attachment_message = decode_attachment_message(content)
         is_supervisor = any(supervisor["id"] == sender["id"] for supervisor in self._supervisors)
+        is_mentioned = any(mention["peerId"] == credentials.peer["id"] for mention in mentions)
+        counterparty = self._counterparties.get(envelope["conversation_id"]) if is_supervisor else sender
+        routing = (
+            {"mode": "RELAY", "targetHandle": str(counterparty["handle"])}
+            if is_supervisor and not is_mentioned and counterparty
+            else {"mode": "REPLY", "targetHandle": str(sender["handle"])}
+        )
         if not is_supervisor:
             self._counterparties[envelope["conversation_id"]] = sender
             await self._mutate_runtime_state(
@@ -757,7 +830,8 @@ class Agent:
                 received_at=_parse_timestamp(envelope["timestamp"]),
                 is_supervisor=is_supervisor,
                 mentions=mentions,
-                is_mentioned=any(mention["peerId"] == credentials.peer["id"] for mention in mentions),
+                is_mentioned=is_mentioned,
+                routing=routing,
                 attachment=Attachment(
                     descriptor=attachment_message["attachment"],
                     _download=lambda: self._download_attachment(attachment_message["attachment"]),

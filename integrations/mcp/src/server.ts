@@ -164,7 +164,7 @@ export function createAtalkMcpServer(options: AtalkMcpOptions = {}): AtalkMcpRun
   const allowUnsafeWorkroomIo = options.allowUnsafeWorkroomIo
     ?? environmentFlag(process.env.ATALK_ENABLE_UNSAFE_WORKROOM_IO);
   const inbox = new AgentInbox();
-  const server = new McpServer({ name: "atalk", version: "0.1.0-alpha.12" });
+  const server = new McpServer({ name: "atalk", version: "0.1.0-alpha.13" });
   agent.on("message", (message) => inbox.push(message));
   agent.on("error", (error) => console.error(`[aTalk] ${error.message}`));
 

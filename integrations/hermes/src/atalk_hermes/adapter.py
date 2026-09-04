@@ -44,6 +44,15 @@ def _should_dispatch_workroom_event(event: dict[str, Any]) -> bool:
     )
 
 
+def _should_relay_message(message: Message) -> bool:
+    routing = getattr(message, "routing", None)
+    return bool(
+        isinstance(routing, dict)
+        and routing.get("mode") == "RELAY"
+        and routing.get("targetHandle")
+    )
+
+
 class AtalkAdapter(BasePlatformAdapter):
     """Hermes gateway adapter backed by the aTalk Python SDK."""
 
@@ -125,7 +134,7 @@ class AtalkAdapter(BasePlatformAdapter):
         handle = self._handle(chat_id)
         incoming = self._latest_by_chat.get(handle)
         if incoming:
-            relay_to_counterparty = incoming.is_supervisor and not bool(getattr(incoming, "is_mentioned", False))
+            relay_to_counterparty = _should_relay_message(incoming)
             message_id = await (incoming.relay(content) if relay_to_counterparty else incoming.reply(content))
         else:
             message_id = (await self._agent.send_with_details(handle, content)).message_id
@@ -328,7 +337,7 @@ class AtalkAdapter(BasePlatformAdapter):
         incoming = self._latest_by_chat.get(handle)
         name = display_name or path.name
         if incoming:
-            relay_to_counterparty = incoming.is_supervisor and not bool(getattr(incoming, "is_mentioned", False))
+            relay_to_counterparty = _should_relay_message(incoming)
             message_id = await (
                 incoming.relay_attachment_file(path, mime_type, caption, name=name)
                 if relay_to_counterparty

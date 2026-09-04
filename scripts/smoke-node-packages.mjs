@@ -81,6 +81,8 @@ try {
   for (const expected of [
     "token?: string",
     "isSupervisor: boolean",
+    "routing:",
+    'mode: "REPLY" | "RELAY"',
     "relay(text: string): Promise<string>",
     "markRead(): Promise<void>",
     "sendWithDetails(recipientHandle: string, text: string): Promise<SentMessage>",

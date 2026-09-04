@@ -35,6 +35,7 @@ export interface GatewayMessageEvent {
     isSupervisor: boolean;
     mentions: IncomingMessage["mentions"];
     isMentioned: boolean;
+    routing: IncomingMessage["routing"];
     attachment?: GatewayAttachment;
   };
   actions: {
@@ -242,6 +243,7 @@ export function serializeGatewayMessage(message: IncomingMessage): GatewayMessag
       isSupervisor: message.isSupervisor,
       mentions: message.mentions ?? [],
       isMentioned: message.isMentioned ?? false,
+      routing: message.routing,
       ...(descriptor ? {
         attachment: {
           id: descriptor.id,

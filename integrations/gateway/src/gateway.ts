@@ -215,13 +215,17 @@ function messageOrThrow(inbox: GatewayInbox, id: string): MessageContext {
   throw new HttpError(404, "MESSAGE_NOT_FOUND", "The message is unknown or has been acknowledged");
 }
 
+function shouldRelay(message: IncomingMessage): boolean {
+  return message.routing.mode === "RELAY" && message.routing.targetHandle.length > 0;
+}
+
 function replyText(message: IncomingMessage, text: string): Promise<string> {
-  return message.isSupervisor && !message.isMentioned ? message.relay(text) : message.reply(text);
+  return shouldRelay(message) ? message.relay(text) : message.reply(text);
 }
 
 function replyAttachment(message: IncomingMessage, data: Uint8Array, name: string, mimeType: string, caption?: string): Promise<string> {
   const input = { data, name, mimeType, ...(caption ? { caption } : {}) };
-  return message.isSupervisor && !message.isMentioned ? message.relayAttachment(input) : message.replyAttachment(input);
+  return shouldRelay(message) ? message.relayAttachment(input) : message.replyAttachment(input);
 }
 
 function durableTarget(record: GatewayInboxRecord): string {
@@ -792,7 +796,7 @@ class GatewayRuntime implements AtalkGatewayRuntime {
         try {
           const input = { path: staged.path, name, mimeType, ...(caption ? { caption } : {}), transfer: { signal: transfer.signal } };
           const messageId = message.live
-            ? await (message.live.isSupervisor && !message.live.isMentioned
+            ? await (shouldRelay(message.live)
               ? message.live.relayAttachmentFile(input)
               : message.live.replyAttachmentFile(input))
             : await this.agent.sendAttachmentFileInConversation(durableTarget(record!), input, conversationId);

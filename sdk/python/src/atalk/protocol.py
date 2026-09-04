@@ -28,6 +28,13 @@ def b64url_decode(value: str) -> bytes:
     return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
 
 
+def _signing_seed(value: str) -> bytes:
+    decoded = b64url_decode(value)
+    if len(decoded) not in {32, 64}:
+        raise ValueError("INVALID_SIGNING_SECRET_KEY_LENGTH")
+    return decoded[:32]
+
+
 def canonical_bytes(value: dict[str, Any]) -> bytes:
     return json.dumps(
         value,
@@ -47,7 +54,7 @@ def hash_b64url_payload(value: str) -> str:
 
 
 def sign_canonical(value: Any, signing_secret_key: str) -> str:
-    signature = SigningKey(b64url_decode(signing_secret_key)[:32]).sign(canonical_bytes(value)).signature
+    signature = SigningKey(_signing_seed(signing_secret_key)).sign(canonical_bytes(value)).signature
     return b64url_encode(signature)
 
 
@@ -250,7 +257,10 @@ def encrypt_text(
         "nonce": b64url_encode(actual_nonce),
         "ciphertext": b64url_encode(ciphertext),
     }
-    signature = SigningKey(b64url_decode(sender_signing_secret_key)).sign(canonical_bytes(unsigned)).signature
+    # PyNaCl accepts the 32-byte Ed25519 seed. Existing credentials created by
+    # the Node SDK store the 64-byte secret key (seed + public key), so trim it
+    # just as sign_canonical() does to keep credentials portable across SDKs.
+    signature = SigningKey(_signing_seed(sender_signing_secret_key)).sign(canonical_bytes(unsigned)).signature
     return {**unsigned, "signature": b64url_encode(signature)}
 
 

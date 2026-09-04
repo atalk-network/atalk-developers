@@ -20,6 +20,7 @@ function messageWithMime(mimeType: string): IncomingMessage {
     isSupervisor: false,
     mentions: [],
     isMentioned: false,
+    routing: { mode: "REPLY", targetHandle: "@sender" },
     markRead: async () => undefined,
     reply: async () => "44444444-4444-4444-8444-444444444444",
     relay: async () => "55555555-5555-4555-8555-555555555555",
@@ -91,10 +92,10 @@ describe("aTalk OpenClaw channel", () => {
     expect(mediaKind(messageWithMime("audio/webm"))).toBe("audio");
   });
 
-  it("keeps explicit owner mentions private and relays only unmentioned supervision", () => {
-    expect(shouldRelaySupervisorMessage({ isSupervisor: true, isMentioned: true })).toBe(false);
-    expect(shouldRelaySupervisorMessage({ isSupervisor: true, isMentioned: false })).toBe(true);
-    expect(shouldRelaySupervisorMessage({ isSupervisor: false, isMentioned: false })).toBe(false);
+  it("obeys the SDK routing decision for supervisor responses", () => {
+    expect(shouldRelaySupervisorMessage({ routing: { mode: "REPLY", targetHandle: "@owner" } })).toBe(false);
+    expect(shouldRelaySupervisorMessage({ routing: { mode: "RELAY", targetHandle: "@counterparty" } })).toBe(true);
+    expect(shouldRelaySupervisorMessage({ routing: { mode: "RELAY", targetHandle: "" } })).toBe(false);
   });
 
   it("retries approval waits without poisoning the poll loop on terminal denial", () => {
