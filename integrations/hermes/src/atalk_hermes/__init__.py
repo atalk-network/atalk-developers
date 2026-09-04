@@ -7,6 +7,9 @@ from pathlib import Path
 from typing import Any
 
 
+__version__ = "0.1.0a11"
+
+
 def _credential_path() -> Path:
     configured = os.getenv("ATALK_CREDENTIAL_PATH", "").strip()
     return Path(configured or "~/.hermes/atalk/agent-credentials.json").expanduser().resolve()
@@ -78,5 +81,6 @@ def register(ctx) -> None:
 
 
 __all__ = [
-    "check_requirements", "env_enablement", "parse_target_ref", "register", "validate_config", "validate_target_ref",
+    "__version__", "check_requirements", "env_enablement", "parse_target_ref", "register", "validate_config",
+    "validate_target_ref",
 ]

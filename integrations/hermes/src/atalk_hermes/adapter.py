@@ -9,9 +9,11 @@ import hashlib
 from pathlib import Path
 from typing import Any
 
-from atalk import Agent, Message
+from atalk import Agent, Message, RuntimeComponent, RuntimeOptions, RuntimeUpdateAdvisory
 from gateway.config import Platform, PlatformConfig
 from gateway.platforms.base import BasePlatformAdapter, MessageEvent, MessageType, SendResult
+
+from . import __version__
 
 
 logger = logging.getLogger(__name__)
@@ -68,14 +70,35 @@ class AtalkAdapter(BasePlatformAdapter):
         self._media_directory = Path(
             str(extra.get("media_directory") or os.getenv("ATALK_MEDIA_DIR", "~/.hermes/atalk/media"))
         ).expanduser().resolve()
+        managed_runtime = os.getenv("ATALK_RUNTIME_MANAGER", "").strip().lower() in {"1", "true", "yes"}
+        update_status_path = os.getenv("ATALK_UPDATE_STATUS_PATH", "").strip()
         self._agent = Agent(
             token=token or None,
             base_url=str(extra.get("base_url") or os.getenv("ATALK_BASE_URL", "https://api.atalk.ar")),
             credential_path=credential_path,
+            runtime=RuntimeOptions(
+                integration=RuntimeComponent("atalk-hermes", __version__),
+                capabilities=[
+                    "attachments", "directed-mentions", "e2ee", "hermes.platform", "supervision", "text", "workrooms",
+                    *(["runtime.auto-update"] if managed_runtime else []),
+                ],
+                **({"update_status_path": update_status_path} if update_status_path else {}),
+            ),
         )
         self._latest_by_chat: dict[str, Message] = {}
         self._latest_workroom_event: dict[str, dict[str, Any]] = {}
         self._workroom_poll_task: asyncio.Task[None] | None = None
+        self._agent.on_update(self._on_runtime_update)
+
+    async def _on_runtime_update(self, advisory: RuntimeUpdateAdvisory) -> None:
+        if advisory.status in {"UPDATE_AVAILABLE", "UPDATE_REQUIRED"}:
+            logger.warning(
+                "aTalk runtime %s; recommended=%s policy=%s%s",
+                advisory.status.lower().replace("_", " "),
+                advisory.recommended_version or "unknown",
+                advisory.policy,
+                f" release={advisory.release_notes_url}" if advisory.release_notes_url else "",
+            )
 
     async def connect(self, *, is_reconnect: bool = False) -> bool:
         self._media_directory.mkdir(mode=0o700, parents=True, exist_ok=True)

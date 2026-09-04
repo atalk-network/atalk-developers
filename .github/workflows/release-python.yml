@@ -55,7 +55,14 @@ jobs:
           "$RUNNER_TEMP/atalk-wheel-smoke/bin/pip" install sdk/python/dist/*.whl
           "$RUNNER_TEMP/atalk-wheel-smoke/bin/python" - <<'PY'
           import inspect
-          from atalk import Agent, Message, WorkroomClient
+          from atalk import (
+              Agent,
+              Message,
+              RuntimeManager,
+              RuntimeOptions,
+              RuntimeUpdateAdvisory,
+              WorkroomClient,
+          )
 
           assert "supervision" in inspect.signature(Agent).parameters
           assert inspect.signature(Agent).parameters["token"].default is None
@@ -69,7 +76,19 @@ jobs:
           assert hasattr(WorkroomClient, "read_audit_events")
           assert hasattr(WorkroomClient, "publish_mandated")
           assert hasattr(WorkroomClient, "submit_file_mandated")
+          assert RuntimeManager is not None
+          assert RuntimeOptions is not None
+          assert RuntimeUpdateAdvisory is not None
           print("Verified packaged Python direct-message and Task APIs")
+          PY
+          "$RUNNER_TEMP/atalk-wheel-smoke/bin/pip" install --no-deps integrations/hermes/dist/*.whl
+          "$RUNNER_TEMP/atalk-wheel-smoke/bin/python" - <<'PY'
+          import importlib.metadata
+          import atalk_hermes
+
+          assert importlib.metadata.version("atalk-hermes") == "0.1.0a11"
+          assert atalk_hermes.__version__ == "0.1.0a11"
+          print("Verified packaged Hermes plugin runtime surface")
           PY
       - uses: actions/upload-artifact@v7
         with:

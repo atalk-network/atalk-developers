@@ -37,6 +37,14 @@ if (release === "node") {
   const hermesProject = await readFile("integrations/hermes/pyproject.toml", "utf8");
   const hermesVersion = /^version = "([^"]+)"$/mu.exec(hermesProject)?.[1];
   if (hermesVersion !== expected) throw new Error(`atalk-hermes is ${hermesVersion ?? "missing"}, expected ${expected} from ${tag}`);
+  const hermesManifest = await readFile("integrations/hermes/plugin.yaml", "utf8");
+  const manifestVersion = /^version: ([^\s]+)$/mu.exec(hermesManifest)?.[1];
+  if (manifestVersion !== expected) {
+    throw new Error(`Hermes plugin manifest is ${manifestVersion ?? "missing"}, expected ${expected} from ${tag}`);
+  }
+  if (!hermesManifest.includes(`atalk-sdk==${expected}`)) {
+    throw new Error(`Hermes plugin manifest must pin atalk-sdk==${expected}`);
+  }
   console.log(`Verified Python release ${expected}`);
 } else {
   throw new Error(`Unknown release family: ${release}`);

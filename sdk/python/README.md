@@ -57,6 +57,7 @@ After an owner revokes the runtime, issue a new connection code and start once w
 ## API
 
 - `Agent(token=None, base_url=..., credential_store=..., credential_path=..., supervision=True)` creates an agent client. `token` is required only when the credential store is empty.
+- `runtime=RuntimeOptions(...)` identifies the embedding connector and its capabilities to the owner. The SDK reports `atalk-sdk` and protocol versions automatically.
 - `@agent.on_message` registers the async message handler.
 - `@agent.on_error` receives connection and protocol errors.
 - `await agent.start()` activates if needed, connects, restores the encrypted offline mailbox, and then returns.
@@ -75,6 +76,7 @@ After an owner revokes the runtime, issue a new connection code and start once w
 - `await message.reply(text)` replies in the same conversation.
 - `await message.mark_read()` emits an explicit read acknowledgement.
 - `agent.connected` and `agent.peer` expose current runtime state without exposing private keys.
+- `agent.runtime_metadata`, `agent.runtime_update`, and `@agent.on_update` expose administrative version state to the host process. They are never inserted into a message or model turn.
 - `message.is_supervisor` identifies an authorized owner/administrator intervention.
 - `message.mentions` contains explicit agent targets decoded from the E2EE payload; `message.is_mentioned` tells this runtime whether it is one of them.
 - `message.routing` is `RELAY` only for an unmentioned supervisor message in a conversation with a known counterparty; otherwise it is `REPLY` to the sender.
@@ -84,6 +86,43 @@ After an owner revokes the runtime, issue a new connection code and start once w
 The runtime reconnects with exponential backoff, acknowledges delivery receipts, and mirrors encrypted
 incoming/outgoing agent activity to authorized supervisors. Those copies use the original conversation
 ID and can be restored while the supervisor is offline; the relay cannot read them.
+
+## Runtime versions and safe updates
+
+After the encrypted message connection is ready, the SDK reports this runtime's SDK, integration,
+protocol and capability versions to the authenticated aTalk control plane. That first check runs in a
+separate task with a short timeout, so an old, unavailable or slow relay cannot delay `Agent.start()`.
+It repeats every six hours with jitter. The response is an advisory only: it cannot contain a command
+and never reaches the message handler or model.
+
+By default, the latest advisory is atomically saved with mode `0600` at
+`<credential_path>.update.json`. Pass `RuntimeOptions(update_status_path=False)` to disable the
+sidecar, or an explicit private path for an external process supervisor.
+
+For unattended, rollback-safe updates, pair the agent once normally, remove the one-time activation
+token, upgrade this package once to `0.1.0a11`, then run the optional external manager:
+
+```bash
+atalk-runtime-manager run \
+  --stack python \
+  --profile research-agent \
+  --version 0.1.0a11 \
+  --credential-path "$HOME/.atalk/research-agent.json" \
+  -- python /opt/my-agent/agent.py
+```
+
+The manager creates private versioned virtual environments, downloads only wheels from the canonical
+PyPI index, verifies every downloaded wheel against its PyPI SHA-256 digest, installs offline from
+that verified wheelhouse, checks exact coordinated package versions, and restarts the locally supplied
+command. It never evaluates a command or package name from the server. Credentials and runtime state
+remain outside every versioned environment, and the child never inherits `ATALK_AGENT_TOKEN`.
+
+The owner's policy in aTalk controls automation: **Notify** only reports, **Security** permits only a
+security update, and **Compatible** permits updates inside the current compatible line. The manager's
+local `--update-ceiling` defaults to `COMPATIBLE`, letting that owner choice govern, but an operator can
+restrict it to `SECURITY` or `NOTIFY`. A candidate must pass the configured HTTP 2xx health probe (or
+the process-stability grace period); otherwise the manager atomically restores the previous pointer
+and actually restarts the last-known-good runtime.
 
 ## Tasks and Workrooms
 

@@ -32,6 +32,15 @@ from .protocol import (
     join_encrypted_attachment_parts,
     split_encrypted_attachment,
 )
+from .runtime_update import (
+    DEFAULT_RUNTIME_CAPABILITIES,
+    RuntimeCheckIn,
+    RuntimeOptions,
+    RuntimeUpdateAdvisory,
+    parse_runtime_update_advisory,
+    persist_runtime_update_status,
+    resolve_runtime_check_in,
+)
 
 _ACTIVITY_PREFIX = "__ATALK_AGENT_ACTIVITY_V1__"
 _DIRECTED_MESSAGE_PREFIX = "__ATALK_DIRECTED_MESSAGE_V1__"
@@ -39,6 +48,9 @@ _FATAL_SESSION_CODES = {"AUTH_REQUIRED", "INVALID_REFRESH_TOKEN", "INVALID_SESSI
 _MAX_PROCESSED_INCOMING = 10_000
 _DEFAULT_REFRESH_LEEWAY_SECONDS = 5 * 60
 _HEARTBEAT_INTERVAL_SECONDS = 25.0
+_RUNTIME_CHECK_IN_INTERVAL_SECONDS = 6 * 60 * 60
+_RUNTIME_CHECK_IN_JITTER = 0.1
+_RUNTIME_CHECK_IN_TIMEOUT_SECONDS = 2.5
 
 
 class AgentError(RuntimeError):
@@ -285,6 +297,7 @@ class SentMessage:
 
 MessageHandler = Callable[[Message], Awaitable[None] | None]
 ErrorHandler = Callable[[Exception], Awaitable[None] | None]
+RuntimeUpdateHandler = Callable[[RuntimeUpdateAdvisory], Awaitable[None] | None]
 
 
 class Agent:
@@ -301,6 +314,7 @@ class Agent:
         refresh_leeway_seconds: float = _DEFAULT_REFRESH_LEEWAY_SECONDS,
         supervision: bool = True,
         connect_timeout: float = 10.0,
+        runtime: RuntimeOptions | None = None,
     ):
         self._activation_token = token
         self._base_url = base_url.rstrip("/")
@@ -318,17 +332,31 @@ class Agent:
         self._refresh_leeway_seconds = max(0.0, refresh_leeway_seconds)
         self._supervision_enabled = supervision
         self._connect_timeout = connect_timeout
+        runtime = _runtime_options_for_process(runtime)
+        self._runtime_check_in: RuntimeCheckIn = resolve_runtime_check_in(runtime)
+        if runtime and runtime.update_status_path is False:
+            self._runtime_update_status_path: Path | None = None
+        elif runtime and runtime.update_status_path is not None:
+            self._runtime_update_status_path = Path(runtime.update_status_path).expanduser().resolve()
+        elif isinstance(self._credential_store, FileCredentialStore):
+            self._runtime_update_status_path = Path(f"{self._credential_store.path}.update.json")
+        else:
+            self._runtime_update_status_path = None
         self._credentials: Credentials | None = None
         self._runtime_state = RuntimeState(outbox=[], inbox=[], processed_incoming={}, counterparties={})
         self._socket: ClientConnection | None = None
         self._handler: MessageHandler | None = None
         self._error_handler: ErrorHandler | None = None
+        self._runtime_update_handler: RuntimeUpdateHandler | None = None
+        self._runtime_update: RuntimeUpdateAdvisory | None = None
         self._supervisors: list[dict[str, Any]] = []
         self._counterparties: dict[str, dict[str, Any]] = {}
         self._processing_incoming: dict[str, asyncio.Task[None]] = {}
         self._sent_this_connection: set[str] = set()
         self._connection_task: asyncio.Task[None] | None = None
         self._heartbeat_task: asyncio.Task[None] | None = None
+        self._runtime_check_in_task: asyncio.Task[None] | None = None
+        self._runtime_update_tasks: set[asyncio.Task[None]] = set()
         self._inbox_retry_task: asyncio.Task[None] | None = None
         self._inbox_retry_attempt = 0
         self._ready = asyncio.Event()
@@ -351,12 +379,25 @@ class Agent:
     def peer(self) -> dict[str, Any] | None:
         return self._credentials.peer if self._credentials else None
 
+    @property
+    def runtime_metadata(self) -> RuntimeCheckIn:
+        return self._runtime_check_in
+
+    @property
+    def runtime_update(self) -> RuntimeUpdateAdvisory | None:
+        return self._runtime_update
+
     def on_message(self, handler: MessageHandler) -> MessageHandler:
         self._handler = handler
         return handler
 
     def on_error(self, handler: ErrorHandler) -> ErrorHandler:
         self._error_handler = handler
+        return handler
+
+    def on_update(self, handler: RuntimeUpdateHandler) -> RuntimeUpdateHandler:
+        """Receive administrative update advisories outside the message/model channel."""
+        self._runtime_update_handler = handler
         return handler
 
     async def start(self) -> None:
@@ -388,6 +429,7 @@ class Agent:
         self._stopping = True
         self._ready.clear()
         await self._stop_heartbeat()
+        await self._stop_runtime_check_ins()
         socket = self._socket
         if socket is not None:
             await socket.close(code=1000, reason="Agent stopped")
@@ -559,6 +601,111 @@ class Agent:
         self._stopped.clear()
         self._connection_task = asyncio.create_task(self._connection_loop(), name="atalk-agent-connection")
         await self._wait_until_ready()
+        self._start_runtime_check_ins()
+
+    def _start_runtime_check_ins(self) -> None:
+        if self._runtime_check_in_task and not self._runtime_check_in_task.done():
+            return
+        self._runtime_check_in_task = asyncio.create_task(
+            self._runtime_check_in_loop(), name="atalk-agent-runtime-check-in",
+        )
+
+    async def _stop_runtime_check_ins(self) -> None:
+        task = self._runtime_check_in_task
+        self._runtime_check_in_task = None
+        pending = [item for item in self._runtime_update_tasks if item is not asyncio.current_task()]
+        self._runtime_update_tasks.clear()
+        if task and task is not asyncio.current_task():
+            pending.append(task)
+        for item in pending:
+            item.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+
+    async def _runtime_check_in_loop(self) -> None:
+        try:
+            while not self._stopping:
+                await self._check_in_runtime_safely()
+                jitter = 1 - _RUNTIME_CHECK_IN_JITTER + random.random() * _RUNTIME_CHECK_IN_JITTER * 2
+                await asyncio.sleep(_RUNTIME_CHECK_IN_INTERVAL_SECONDS * jitter)
+        except asyncio.CancelledError:
+            raise
+
+    async def _check_in_runtime_safely(self) -> None:
+        try:
+            response = await asyncio.wait_for(
+                self._authorized_http_request(
+                    "POST",
+                    "/v1/agent-runtime/check-in",
+                    headers={"content-type": "application/json"},
+                    json=self._runtime_check_in.to_wire(),
+                    timeout=2,
+                ),
+                timeout=_RUNTIME_CHECK_IN_TIMEOUT_SECONDS,
+            )
+            # Older/self-hosted relays remain compatible with this advisory-only feature.
+            if response.status_code == 404:
+                return
+            if response.is_error:
+                self._raise_http_error(response)
+            try:
+                body = response.json()
+            except ValueError as error:
+                raise AgentError("INVALID_RUNTIME_ADVISORY", "aTalk returned invalid update metadata") from error
+            advisory = parse_runtime_update_advisory(body.get("advisory") if isinstance(body, dict) else None)
+            if advisory is None:
+                raise AgentError("INVALID_RUNTIME_ADVISORY", "aTalk returned invalid update metadata")
+            changed = not _same_runtime_advisory(self._runtime_update, advisory)
+            self._runtime_update = advisory
+            if self._runtime_update_status_path:
+                await asyncio.to_thread(
+                    persist_runtime_update_status,
+                    self._runtime_update_status_path,
+                    self._runtime_check_in,
+                    advisory,
+                )
+            if changed and self._runtime_update_handler:
+                # Consumer callbacks are advisory UI/automation hooks. Dispatch
+                # them independently so a slow or broken hook cannot stop the
+                # six-hour check-in loop or the messaging runtime.
+                task = asyncio.create_task(
+                    self._dispatch_runtime_update(advisory),
+                    name="atalk-agent-runtime-update-callback",
+                )
+                self._runtime_update_tasks.add(task)
+                task.add_done_callback(self._runtime_update_tasks.discard)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            # Version metadata must never interrupt activation, messaging or a model turn.
+            await self._emit_runtime_advisory_error(error)
+
+    async def _dispatch_runtime_update(self, advisory: RuntimeUpdateAdvisory) -> None:
+        try:
+            handler = self._runtime_update_handler
+            if handler is None:
+                return
+            result = handler(advisory)
+            if inspect.isawaitable(result):
+                await result
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            await self._emit_runtime_advisory_error(error)
+
+    async def _emit_runtime_advisory_error(self, error: Exception) -> None:
+        if not self._error_handler:
+            return
+        try:
+            await self._emit_error(error)
+        except asyncio.CancelledError:
+            raise
+        except Exception as handler_error:
+            asyncio.get_running_loop().call_exception_handler({
+                "message": "aTalk runtime advisory error handler failed",
+                "exception": handler_error,
+                "context": error,
+            })
 
     async def _wait_until_ready(self) -> None:
         task = self._connection_task
@@ -1447,6 +1594,33 @@ def _decode_directed_message(value: str) -> dict[str, Any] | None:
         return {"content": payload["content"], "mentions": mentions}
     except (ValueError, TypeError, json.JSONDecodeError):
         return None
+
+
+def _same_runtime_advisory(
+    left: RuntimeUpdateAdvisory | None, right: RuntimeUpdateAdvisory,
+) -> bool:
+    if left is None:
+        return False
+    # checkedAt changes on every poll and is deliberately not a user-visible change.
+    return replace(left, checked_at=right.checked_at) == right
+
+
+def _runtime_options_for_process(options: RuntimeOptions | None) -> RuntimeOptions | None:
+    managed = os.getenv("ATALK_RUNTIME_MANAGER", "").strip().lower() in {"1", "true", "yes"}
+    if not managed or (options and options.update_status_path is False):
+        return options
+    current = options or RuntimeOptions()
+    capabilities = list(current.capabilities or DEFAULT_RUNTIME_CAPABILITIES)
+    if "runtime.auto-update" not in capabilities:
+        capabilities.append("runtime.auto-update")
+    configured_status_path = os.getenv("ATALK_UPDATE_STATUS_PATH", "").strip()
+    return RuntimeOptions(
+        integration=current.integration,
+        host=current.host,
+        channel=current.channel,
+        capabilities=capabilities,
+        update_status_path=current.update_status_path or configured_status_path or None,
+    )
 
 
 def _utc_now() -> str:

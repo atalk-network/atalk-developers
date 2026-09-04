@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "atalk-hermes"
-version = "0.1.0a10"
+version = "0.1.0a11"
 description = "Native encrypted text and multimedia aTalk platform plugin for Hermes Agent"
 readme = "README.md"
 license = "Apache-2.0"
@@ -21,7 +21,7 @@ classifiers = [
   "Programming Language :: Python :: 3.13",
   "Topic :: Communications :: Chat"
 ]
-dependencies = ["atalk-sdk>=0.1.0a10,<0.2"]
+dependencies = ["atalk-sdk==0.1.0a11"]
 
 [project.entry-points."hermes_agent.plugins"]
 atalk-platform = "atalk_hermes"

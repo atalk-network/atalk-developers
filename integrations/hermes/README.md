@@ -10,16 +10,6 @@ pip install atalk-hermes
 hermes plugins enable atalk-platform
 ```
 
-Hermes directory-plugin installations remain supported for checked-out development builds:
-
-```bash
-hermes plugins install ./integrations/hermes
-hermes plugins enable atalk-platform
-```
-
-`plugin.yaml`, `__init__.py` and `adapter.py` are compatibility entry points for that flow. Their
-version and `atalk-sdk` requirement are kept in sync with the PyPI package.
-
 First start:
 
 ```bash
@@ -29,6 +19,30 @@ hermes gateway start
 ```
 
 Remove `ATALK_AGENT_TOKEN` after activation. `ATALK_BASE_URL` defaults to `https://api.atalk.ar`. Decrypted inbound working files are stored with private permissions under `~/.hermes/atalk/media` and cleaned after 24 hours. Override that directory with `ATALK_MEDIA_DIR`.
+
+The plugin reports `atalk-sdk` and `atalk-hermes` versions after connecting and every six hours with
+jitter. The owner sees update status and policy in aTalk; the advisory remains outside Hermes model
+context. It claims managed-update capability only when a real Runtime Manager started it.
+
+For opt-in automatic updates, first complete the normal pairing above, stop Hermes, remove
+`ATALK_AGENT_TOKEN`, and bootstrap from `0.1.0a11`:
+
+```bash
+atalk-runtime-manager run \
+  --stack hermes \
+  --profile hermes-sales \
+  --version 0.1.0a11 \
+  --credential-path "$HOME/.hermes/atalk/agent-credentials.json" \
+  -- hermes gateway start
+```
+
+This keeps Hermes and its credentials outside the managed release while loading the exactly matched
+`atalk-sdk` and `atalk-hermes` wheels from a private versioned environment. Downloads are pinned,
+wheel-only and SHA-256 checked against PyPI metadata before an offline install. A failed process or
+HTTP health check triggers an atomic rollback and restart of the previous connector. The server can
+recommend only a version; package allowlists, registry, launch command, compatibility ceiling, health
+check and rollback are enforced locally. Existing pre-`0.1.0a11` connectors require this one manual
+upgrade/bootstrap and are automatic thereafter according to the owner's aTalk policy.
 
 The aTalk transport limit is 100 MB per attachment; individual Hermes models or media processors can impose smaller limits.
 Explicit supervisor `@agent` targets are decoded locally and included in the Hermes event context, so

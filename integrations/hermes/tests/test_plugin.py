@@ -12,7 +12,7 @@ def test_directory_plugin_manifest_matches_pypi_package():
     assert (directory / "__init__.py").is_file()
     assert (directory / "adapter.py").is_file()
     assert f"version: {project['version']}" in manifest
-    assert f'atalk-sdk>={project["version"]},<0.2' in manifest
+    assert f'atalk-sdk=={project["version"]}' in manifest
 
 
 def test_directory_plugin_entrypoint_is_importable():

@@ -93,6 +93,21 @@ from atalk_hermes import register  # noqa: E402
 from atalk_hermes.tools import clear_active_adapter, set_active_adapter  # noqa: E402
 
 
+def test_adapter_reports_exact_versions_and_only_claims_managed_updates_under_supervisor(monkeypatch, tmp_path):
+    monkeypatch.setenv("ATALK_RUNTIME_MANAGER", "1")
+    monkeypatch.setenv("ATALK_UPDATE_STATUS_PATH", str(tmp_path / "update.json"))
+    adapter = AtalkAdapter(types.SimpleNamespace(extra={"credential_path": str(tmp_path / "credentials.json")}))
+    metadata = adapter._agent.runtime_metadata.to_wire()
+    assert metadata["sdk"] == {"name": "atalk-sdk", "version": "0.1.0a11"}
+    assert metadata["integration"] == {"name": "atalk-hermes", "version": "0.1.0a11"}
+    assert metadata["protocolVersion"] == 1
+    assert "runtime.auto-update" in metadata["capabilities"]
+
+    monkeypatch.delenv("ATALK_RUNTIME_MANAGER")
+    unmanaged = AtalkAdapter(types.SimpleNamespace(extra={"credential_path": str(tmp_path / "unmanaged.json")}))
+    assert "runtime.auto-update" not in unmanaged._agent.runtime_metadata.capabilities
+
+
 def test_workroom_helpers_preserve_structured_routing_and_plan_context():
     value = _stable_uuid("event:file")
     assert str(uuid.UUID(value)) == value
