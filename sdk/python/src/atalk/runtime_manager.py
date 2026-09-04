@@ -8,6 +8,7 @@ probe all come from this local program/configuration.
 from __future__ import annotations
 
 import argparse
+import base64
 import contextlib
 import hashlib
 import hmac
@@ -32,6 +33,13 @@ from .runtime_update import RuntimeUpdateAdvisory, parse_runtime_update_advisory
 
 
 PYPI_INDEX = "https://pypi.org/simple"
+PYPI_PUBLISH_ATTESTATION = "https://docs.pypi.org/attestations/publish/v1"
+OFFICIAL_PUBLISHER = {
+    "environment": "pypi",
+    "kind": "GitHub",
+    "repository": "atalk-network/atalk-developers",
+    "workflow": "release-python.yml",
+}
 MAX_STATUS_BYTES = 64 * 1024
 MAX_TRACKED_UPDATE_FAILURES = 32
 STAGING_BACKOFF_SECONDS = (5 * 60, 15 * 60, 60 * 60, 6 * 60 * 60)
@@ -795,6 +803,9 @@ def _pypi_release_hashes(package: str, version: str) -> dict[str, str]:
     if not isinstance(value, dict) or not isinstance(value.get("urls"), list):
         raise RuntimeManagerError(f"PyPI metadata omitted release files for {package}=={version}")
     hashes: dict[str, str] = {}
+    official_package = _normalize_distribution(package) in {
+        _normalize_distribution(name) for packages in PACKAGE_STACKS.values() for name in packages
+    }
     for artifact in value["urls"]:
         if (
             isinstance(artifact, dict)
@@ -804,10 +815,88 @@ def _pypi_release_hashes(package: str, version: str) -> dict[str, str]:
             and isinstance(artifact.get("digests"), dict)
             and isinstance(artifact["digests"].get("sha256"), str)
         ):
-            hashes[artifact["filename"]] = artifact["digests"]["sha256"]
+            filename = artifact["filename"]
+            digest = artifact["digests"]["sha256"]
+            if official_package and not _pypi_trusted_publisher_attests(package, version, filename, digest):
+                continue
+            hashes[filename] = digest
     if not hashes:
-        raise RuntimeManagerError(f"PyPI has no trusted wheels for {package}=={version}")
+        suffix = " with the official aTalk Trusted Publisher provenance" if official_package else ""
+        raise RuntimeManagerError(f"PyPI has no trusted wheels{suffix} for {package}=={version}")
     return hashes
+
+
+def _pypi_trusted_publisher_attests(package: str, version: str, filename: str, digest: str) -> bool:
+    url = (
+        "https://pypi.org/integrity/"
+        f"{quote(package, safe='')}/{quote(version, safe='')}/{quote(filename, safe='')}/provenance"
+    )
+    request = Request(
+        url,
+        method="GET",
+        headers={
+            "accept": "application/vnd.pypi.integrity.v1+json",
+            "user-agent": "atalk-runtime-manager/1",
+        },
+    )
+    try:
+        with urlopen(request, timeout=10) as response:
+            if response.status != 200:
+                return False
+            payload = response.read(4 * 1024 * 1024 + 1)
+    except OSError:
+        return False
+    if len(payload) > 4 * 1024 * 1024:
+        return False
+    try:
+        provenance = json.loads(payload)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    return _trusted_publisher_provenance_matches(provenance, filename, digest)
+
+
+def _trusted_publisher_provenance_matches(value: Any, filename: str, digest: str) -> bool:
+    if (
+        not isinstance(value, dict)
+        or value.get("version") != 1
+        or not isinstance(value.get("attestation_bundles"), list)
+        or not re.fullmatch(r"[0-9a-fA-F]{64}", digest)
+    ):
+        return False
+    for bundle in value["attestation_bundles"]:
+        if (
+            not isinstance(bundle, dict)
+            or bundle.get("publisher") != OFFICIAL_PUBLISHER
+            or not isinstance(bundle.get("attestations"), list)
+        ):
+            continue
+        for attestation in bundle["attestations"]:
+            envelope = attestation.get("envelope") if isinstance(attestation, dict) else None
+            encoded = envelope.get("statement") if isinstance(envelope, dict) else None
+            if not isinstance(encoded, str) or len(encoded) > 1024 * 1024:
+                continue
+            try:
+                statement = json.loads(base64.b64decode(encoded, validate=True))
+            except (ValueError, UnicodeDecodeError, json.JSONDecodeError):
+                continue
+            if (
+                not isinstance(statement, dict)
+                or statement.get("_type") != "https://in-toto.io/Statement/v1"
+                or statement.get("predicateType") != PYPI_PUBLISH_ATTESTATION
+                or not isinstance(statement.get("subject"), list)
+            ):
+                continue
+            for subject in statement["subject"]:
+                subject_digest = subject.get("digest") if isinstance(subject, dict) else None
+                if (
+                    isinstance(subject, dict)
+                    and subject.get("name") == filename
+                    and isinstance(subject_digest, dict)
+                    and isinstance(subject_digest.get("sha256"), str)
+                    and hmac.compare_digest(subject_digest["sha256"].lower(), digest.lower())
+                ):
+                    return True
+    return False
 
 
 def _health_response_is_ready(response: Any) -> bool:

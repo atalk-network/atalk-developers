@@ -38,7 +38,8 @@ atalk-runtime-manager run \
 
 This keeps Hermes and its credentials outside the managed release while loading the exactly matched
 `atalk-sdk` and `atalk-hermes` wheels from a private versioned environment. Downloads are pinned,
-wheel-only and SHA-256 checked against PyPI metadata before an offline install. A failed process or
+wheel-only, SHA-256 checked, and required to carry PyPI-verified Trusted Publisher provenance for the
+official aTalk repository and release workflow before an offline install. A failed process or
 HTTP health check triggers an atomic rollback and restart of the previous connector. The server can
 recommend only a version; package allowlists, registry, launch command, compatibility ceiling, health
 check and rollback are enforced locally. Existing pre-`0.1.0a11` connectors require this one manual

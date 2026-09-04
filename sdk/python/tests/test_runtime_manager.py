@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import hashlib
 import os
@@ -20,6 +21,7 @@ from atalk.runtime_manager import (
     RuntimeManagerError,
     _exclusive_lock,
     _health_response_is_ready,
+    _trusted_publisher_provenance_matches,
 )
 
 
@@ -157,6 +159,35 @@ def test_tampered_download_hash_is_rejected(tmp_path):
     (wheelhouse / "atalk_sdk-0.1.0a11-py3-none-any.whl").write_bytes(b"tampered")
     with pytest.raises(RuntimeManagerError, match="SHA-256"):
         manager._verify_downloaded_wheels(wheelhouse)
+
+
+def test_official_wheels_require_exact_trusted_publisher_provenance():
+    filename = "atalk_sdk-0.1.0a11-py3-none-any.whl"
+    digest = "a" * 64
+    statement = base64.b64encode(json.dumps({
+        "_type": "https://in-toto.io/Statement/v1",
+        "subject": [{"name": filename, "digest": {"sha256": digest}}],
+        "predicateType": "https://docs.pypi.org/attestations/publish/v1",
+        "predicate": None,
+    }).encode()).decode()
+    provenance = {
+        "version": 1,
+        "attestation_bundles": [{
+            "publisher": {
+                "environment": "pypi",
+                "kind": "GitHub",
+                "repository": "atalk-network/atalk-developers",
+                "workflow": "release-python.yml",
+            },
+            "attestations": [{"version": 1, "envelope": {"statement": statement}}],
+        }],
+    }
+
+    assert _trusted_publisher_provenance_matches(provenance, filename, digest) is True
+    provenance["attestation_bundles"][0]["publisher"]["repository"] = "attacker/fork"
+    assert _trusted_publisher_provenance_matches(provenance, filename, digest) is False
+    provenance["attestation_bundles"][0]["publisher"]["repository"] = "atalk-network/atalk-developers"
+    assert _trusted_publisher_provenance_matches(provenance, filename, "b" * 64) is False
 
 
 def test_private_status_is_authenticated_and_local_ceiling_restricts_owner_policy(tmp_path):

@@ -115,10 +115,12 @@ The managed installer currently targets macOS and Linux. SDK messaging and versi
 portable on Windows, where process replacement stays a manual operator action for this release.
 
 The manager creates private versioned virtual environments, downloads only wheels from the canonical
-PyPI index, verifies every downloaded wheel against its PyPI SHA-256 digest, installs offline from
-that verified wheelhouse, checks exact coordinated package versions, and restarts the locally supplied
-command. It never evaluates a command or package name from the server. Credentials and runtime state
-remain outside every versioned environment, and the child never inherits `ATALK_AGENT_TOKEN`.
+PyPI index, verifies every downloaded wheel against its PyPI SHA-256 digest, and additionally requires
+the aTalk wheels to carry PyPI-verified Trusted Publisher provenance for the official public repository
+and release workflow. It installs offline from that verified wheelhouse, checks exact coordinated
+package versions, and restarts the locally supplied command. It never evaluates a command or package
+name from the server. Credentials and runtime state remain outside every versioned environment, and
+the child never inherits `ATALK_AGENT_TOKEN`.
 
 The owner's policy in aTalk controls automation: **Notify** only reports, **Security** permits only a
 security update, and **Compatible** permits updates inside the current compatible line. The manager's
