@@ -84,8 +84,26 @@ test("fails closed after bounded transient retries", async () => {
       writeStdout: () => {},
       writeStderr: () => {},
     }),
-    /exited with code 1/,
+    (error) => error instanceof Error
+      && /exited with code 1/.test(error.message)
+      && error.transientUnavailable === true,
   );
 
   assert.equal(calls, 3);
+});
+
+test("does not classify a definitive vulnerability result as service unavailability", async () => {
+  await assert.rejects(
+    runNpmWithRetry(["audit", "--audit-level=high", "--json"], {
+      execute: () => ({
+        status: 1,
+        stdout: vulnerabilityReport,
+        stderr: "npm error code ETIMEDOUT while rendering advisory HTTP 500",
+      }),
+      wait: async () => assert.fail("a completed vulnerability report must not be retried"),
+      writeStdout: () => {},
+      writeStderr: () => {},
+    }),
+    (error) => error instanceof Error && error.transientUnavailable === false,
+  );
 });

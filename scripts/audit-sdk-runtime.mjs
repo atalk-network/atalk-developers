@@ -37,12 +37,13 @@ export function isTransientNpmFailure(result) {
   return TRANSIENT_NPM_FAILURE.test(output);
 }
 
-function commandFailure(args, result) {
+function commandFailure(args, result, transientUnavailable = false) {
   const detail = result.signal
     ? `terminated by ${result.signal}`
     : `exited with code ${result.status ?? 1}`;
   const error = new Error(`npm ${args.join(" ")} ${detail}`);
   error.exitCode = result.status ?? 1;
+  error.transientUnavailable = transientUnavailable;
   return error;
 }
 
@@ -80,7 +81,7 @@ export async function runNpmWithRetry(args, options = {}) {
     const retryable = !completedAudit && isTransientNpmFailure(result);
 
     if (!retryable || attempt === maxAttempts) {
-      throw commandFailure(args, result);
+      throw commandFailure(args, result, retryable);
     }
 
     const delay = retryDelayMs * 2 ** (attempt - 1);
@@ -105,6 +106,8 @@ export async function main() {
   }
 
   const directory = await mkdtemp(join(tmpdir(), "atalk-sdk-audit-"));
+  const maxAttempts = positiveIntegerEnvironment("ATALK_AUDIT_MAX_ATTEMPTS", DEFAULT_MAX_ATTEMPTS);
+  const commandTimeoutMs = positiveIntegerEnvironment("ATALK_AUDIT_TIMEOUT_MS", DEFAULT_COMMAND_TIMEOUT_MS);
   try {
     await writeFile(
       join(directory, "package.json"),
@@ -112,16 +115,35 @@ export async function main() {
     );
     await runNpmWithRetry(
       ["install", "--package-lock-only", "--ignore-scripts", "--no-fund", "--no-audit"],
-      { cwd: directory },
+      { cwd: directory, maxAttempts, commandTimeoutMs },
     );
     await runNpmWithRetry(["audit", "--omit=dev", "--audit-level=high", "--json"], {
       cwd: directory,
+      maxAttempts,
+      commandTimeoutMs,
     });
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
 }
 
+function positiveIntegerEnvironment(name, fallback) {
+  const value = process.env[name];
+  if (value === undefined) return fallback;
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 1) throw new TypeError(`${name} must be a positive integer`);
+  return parsed;
+}
+
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  await main();
+  try {
+    await main();
+  } catch (error) {
+    if (error?.transientUnavailable && process.env.ATALK_AUDIT_ALLOW_UNAVAILABLE === "1") {
+      const prefix = process.env.GITHUB_ACTIONS === "true" ? "::warning::" : "[audit:sdk] ";
+      process.stderr.write(`${prefix}npm advisory service unavailable; dependency audit deferred.\n`);
+    } else {
+      throw error;
+    }
+  }
 }

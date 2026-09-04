@@ -39,7 +39,14 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: pnpm typecheck
       - run: pnpm test
-      - run: pnpm audit:sdk
+      - name: Audit SDK runtime dependencies
+        run: pnpm audit:sdk
+        env:
+          # A definitive high/critical advisory still fails this job. A registry
+          # advisory outage is surfaced as a warning so unrelated checks run.
+          ATALK_AUDIT_ALLOW_UNAVAILABLE: "1"
+          ATALK_AUDIT_MAX_ATTEMPTS: "1"
+          ATALK_AUDIT_TIMEOUT_MS: "15000"
       - run: pnpm smoke:sdk:node
       - run: pnpm check:links
       - name: Test Python distributions
