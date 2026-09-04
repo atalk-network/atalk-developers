@@ -4,6 +4,9 @@ import base64
 import json
 import hashlib
 import os
+import uuid
+from dataclasses import replace
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -19,6 +22,7 @@ from atalk.runtime_manager import (
     ManagedRelease,
     RuntimeManager,
     RuntimeManagerError,
+    UpdateStatus,
     _exclusive_lock,
     _health_response_is_ready,
     _trusted_publisher_provenance_matches,
@@ -57,6 +61,7 @@ def make_manager(tmp_path, **overrides):
 
 def update_status(
     policy="COMPATIBLE", severity="INFO", status="UPDATE_AVAILABLE", recommended="0.1.0a12",
+    checked_at="2026-09-04T12:00:00.000Z",
 ):
     parsed = parse_runtime_update_advisory({
         "status": status,
@@ -65,7 +70,7 @@ def update_status(
         "minimumVersion": "0.1.0a10",
         "severity": severity,
         "policy": policy,
-        "checkedAt": "2026-09-04T12:00:00.000Z",
+        "checkedAt": checked_at,
     })
     assert parsed is not None
     return parsed
@@ -225,6 +230,34 @@ def test_private_status_is_authenticated_and_local_ceiling_restricts_owner_polic
     assert manager.should_auto_update(outside_line, "0.1.0a11") is False
 
 
+def test_only_fresh_status_from_the_current_managed_launch_is_actionable(tmp_path):
+    now = datetime.fromisoformat("2026-09-04T12:00:00+00:00").timestamp()
+    manager = make_manager(tmp_path, clock=lambda: now)
+    process = FakeProcess()
+    launch_id = str(uuid.uuid4())
+    manager._process_launch_ids[process.pid] = launch_id
+    metadata = resolve_runtime_check_in(RuntimeOptions(
+        integration=RuntimeComponent("atalk-hermes", "0.1.0a11"),
+        capabilities=["runtime.auto-update"],
+    )).to_wire()
+    current = update_status(checked_at="2026-09-04T12:00:00.000Z")
+    status = UpdateStatus(metadata, current, process.pid, launch_id)
+
+    assert manager._status_is_actionable(status, process, "0.1.0a11") is True
+    assert manager._status_is_actionable(
+        replace(status, advisory=replace(current, checked_at="2026-09-03T23:59:59.000Z")),
+        process,
+        "0.1.0a11",
+    ) is False
+    assert manager._status_is_actionable(
+        replace(status, advisory=replace(current, checked_at="2026-09-04T12:05:01.000Z")),
+        process,
+        "0.1.0a11",
+    ) is False
+    assert manager._status_is_actionable(replace(status, writer_launch_id=str(uuid.uuid4())), process, "0.1.0a11") is False
+    assert manager._status_is_actionable(replace(status, writer_process_id=process.pid + 1), process, "0.1.0a11") is False
+
+
 def test_status_without_manager_capability_or_with_unsafe_permissions_is_ignored(tmp_path):
     manager = make_manager(tmp_path)
     write_status(manager, capabilities=["text"])
@@ -328,6 +361,14 @@ def test_run_skips_quarantined_candidate_without_interrupting_previous_runtime(t
     )
     current = ManagedRelease("0.1.0a11", tmp_path / "old", tmp_path / "old" / "site")
     process = FakeProcess()
+    launch_id = str(uuid.uuid4())
+    value = json.loads(manager.paths.update_status.read_text())
+    value["writerProcessId"] = process.pid
+    value["writerLaunchId"] = launch_id
+    value["advisory"]["checkedAt"] = "2027-01-15T08:00:00.000Z"
+    manager.paths.update_status.write_text(json.dumps(value))
+    os.chmod(manager.paths.update_status, 0o600)
+    manager._process_launch_ids[process.pid] = launch_id
     manager._load_current_release = lambda: current
     manager.launch = lambda _release: process
     manager.health_check = lambda _process: True
@@ -465,6 +506,9 @@ def test_launch_requires_prior_pairing_and_never_inherits_activation_token(tmp_p
     assert "ATALK_AGENT_TOKEN" not in captured["environment"]
     assert "ATALK_ACTIVATION_TOKEN" not in captured["environment"]
     assert captured["environment"]["ATALK_CREDENTIAL_PATH"] == str(manager.paths.credential)
+    launch_id = captured["environment"]["ATALK_RUNTIME_LAUNCH_ID"]
+    assert str(uuid.UUID(launch_id)) == launch_id
+    assert manager._process_launch_ids[FakeProcess.next_pid - 1] == launch_id
 
 
 def test_health_endpoint_requires_2xx_and_connected_state():

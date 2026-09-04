@@ -42,6 +42,8 @@ OFFICIAL_PUBLISHER = {
 }
 MAX_STATUS_BYTES = 64 * 1024
 MAX_TRACKED_UPDATE_FAILURES = 32
+MAX_ADVISORY_AGE_SECONDS = 12 * 60 * 60
+MAX_ADVISORY_FUTURE_SKEW_SECONDS = 5 * 60
 STAGING_BACKOFF_SECONDS = (5 * 60, 15 * 60, 60 * 60, 6 * 60 * 60)
 CANDIDATE_BACKOFF_SECONDS = (6 * 60 * 60, 24 * 60 * 60, 3 * 24 * 60 * 60, 7 * 24 * 60 * 60)
 PACKAGE_STACKS: dict[str, tuple[str, ...]] = {
@@ -85,6 +87,8 @@ class RuntimeManagerPaths:
 class UpdateStatus:
     metadata: dict[str, Any]
     advisory: RuntimeUpdateAdvisory
+    writer_process_id: int | None = None
+    writer_launch_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -193,6 +197,7 @@ class RuntimeManager:
         self._artifact_hash_fetcher = artifact_hash_fetcher or _pypi_release_hashes
         self._clock = clock
         self._stopping = False
+        self._process_launch_ids: dict[int, str] = {}
 
     def run(self) -> int:
         self._prepare_private_directories()
@@ -216,7 +221,11 @@ class RuntimeManager:
                             raise RuntimeManagerError(f"Runtime {release.version} repeatedly failed health checks")
                         self._write_state("RUNNING", release, process.pid)
                     update = self.read_update_status()
-                    if update and self.should_auto_update(update, release.version):
+                    if (
+                        update
+                        and self._status_is_actionable(update, process, release.version)
+                        and self.should_auto_update(update, release.version)
+                    ):
                         target_version = update.advisory.recommended_version or ""
                         deferred = self.update_deferment(target_version)
                         if deferred:
@@ -369,12 +378,14 @@ class RuntimeManager:
 
     def launch(self, release: ManagedRelease) -> subprocess.Popen[bytes]:
         self._validate_paired_credentials()
+        launch_id = str(uuid.uuid4())
         environment = os.environ.copy()
         environment.pop("ATALK_AGENT_TOKEN", None)
         environment.pop("ATALK_ACTIVATION_TOKEN", None)
         environment.update({
             "ATALK_CREDENTIAL_PATH": str(self.paths.credential),
             "ATALK_RUNTIME_MANAGER": "1",
+            "ATALK_RUNTIME_LAUNCH_ID": launch_id,
             "ATALK_UPDATE_STATUS_PATH": str(self.paths.update_status),
             "ATALK_MANAGED_RELEASE": release.version,
             "PYTHONNOUSERSITE": "1",
@@ -384,12 +395,14 @@ class RuntimeManager:
         environment["PATH"] = os.pathsep.join([
             str(_venv_bin(release.path)), environment.get("PATH", ""),
         ])
-        return self._process_factory(
+        process = self._process_factory(
             list(self.command),
             cwd=self.working_directory,
             env=environment,
             start_new_session=os.name != "nt",
         )
+        self._process_launch_ids[process.pid] = launch_id
+        return process
 
     def health_check(self, process: subprocess.Popen[bytes]) -> bool:
         started = time.monotonic()
@@ -578,7 +591,48 @@ class RuntimeManager:
         ):
             return None
         advisory = parse_runtime_update_advisory(value.get("advisory"))
-        return UpdateStatus(metadata=metadata, advisory=advisory) if advisory else None
+        writer_process_id = value.get("writerProcessId")
+        writer_launch_id = value.get("writerLaunchId")
+        if not isinstance(writer_process_id, int) or isinstance(writer_process_id, bool) or writer_process_id <= 0:
+            writer_process_id = None
+        if not isinstance(writer_launch_id, str) or not _is_uuid(writer_launch_id):
+            writer_launch_id = None
+        return UpdateStatus(
+            metadata=metadata,
+            advisory=advisory,
+            writer_process_id=writer_process_id,
+            writer_launch_id=writer_launch_id,
+        ) if advisory else None
+
+    def _status_is_actionable(
+        self,
+        status: UpdateStatus,
+        process: subprocess.Popen[bytes],
+        current_version: str,
+    ) -> bool:
+        launch_id = self._process_launch_ids.get(process.pid)
+        sdk = status.metadata.get("sdk")
+        integration = status.metadata.get("integration")
+        if (
+            status.writer_process_id != process.pid
+            or not launch_id
+            or status.writer_launch_id != launch_id
+            or not isinstance(sdk, dict)
+            or sdk.get("version") != current_version
+            or not isinstance(integration, dict)
+            or integration.get("version") != current_version
+            or status.advisory.current_version != current_version
+        ):
+            return False
+        try:
+            checked_at = _parse_utc_timestamp(status.advisory.checked_at)
+        except ValueError:
+            return False
+        now = self._clock()
+        return (
+            checked_at >= now - MAX_ADVISORY_AGE_SECONDS
+            and checked_at <= now + MAX_ADVISORY_FUTURE_SKEW_SECONDS
+        )
 
     def should_auto_update(self, status: UpdateStatus, current_version: str) -> bool:
         advisory = status.advisory
@@ -677,6 +731,13 @@ def _validate_version(version: str) -> None:
 
 def _absolute_path(value: str | Path) -> Path:
     return Path(os.path.abspath(Path(value).expanduser()))
+
+
+def _is_uuid(value: str) -> bool:
+    try:
+        return str(uuid.UUID(value)) == value.lower()
+    except ValueError:
+        return False
 
 
 def _parse_update_failure(version: Any, value: Any) -> UpdateFailure | None:

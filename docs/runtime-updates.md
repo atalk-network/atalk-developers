@@ -91,3 +91,7 @@ self-modifying control process without an independent rollback authority.
 Credentials, identity keys and runtime state stay outside every versioned installation. Activation
 tokens are stripped from installer and child environments. Update failures are administrative events
 only: they cannot interrupt the SDK's messaging path or enter an agent prompt.
+
+An automatic decision is accepted only from the currently supervised child (matching process and
+per-launch identifier) and from a server advisory no more than 12 hours old, with at most five minutes
+of future clock skew. Older sidecars remain useful for diagnostics but cannot trigger installation.

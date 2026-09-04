@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import uuid
 
 import httpx
 import pytest
@@ -101,14 +102,22 @@ def test_custom_sdk_claims_auto_update_only_when_started_by_manager(monkeypatch,
     assert "runtime.auto-update" not in disabled.runtime_metadata.capabilities
 
 
-def test_persists_private_atomic_supervisor_handoff(tmp_path):
+def test_persists_private_atomic_supervisor_handoff(tmp_path, monkeypatch):
     path = tmp_path / "nested" / "update.json"
+    launch_id = str(uuid.uuid4())
+    monkeypatch.setenv("ATALK_RUNTIME_LAUNCH_ID", launch_id)
     metadata = resolve_runtime_check_in()
     parsed = parse_runtime_update_advisory(advisory())
     assert parsed is not None
     persist_runtime_update_status(path, metadata, parsed)
     value = json.loads(path.read_text())
-    assert value == {"version": 1, "metadata": metadata.to_wire(), "advisory": parsed.to_wire()}
+    assert value == {
+        "version": 1,
+        "writerProcessId": os.getpid(),
+        "writerLaunchId": launch_id,
+        "metadata": metadata.to_wire(),
+        "advisory": parsed.to_wire(),
+    }
     assert path.stat().st_mode & 0o777 == 0o600
     assert not list(path.parent.glob("*.tmp"))
 

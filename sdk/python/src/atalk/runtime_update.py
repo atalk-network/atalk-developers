@@ -149,8 +149,11 @@ def persist_runtime_update_status(
 ) -> None:
     target = Path(path).expanduser().resolve()
     target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    launch_id = _uuid_string(os.environ.get("ATALK_RUNTIME_LAUNCH_ID"))
     value = {
         "version": 1,
+        "writerProcessId": os.getpid(),
+        **({"writerLaunchId": launch_id} if launch_id else {}),
         "metadata": metadata.to_wire(),
         "advisory": advisory.to_wire(),
     }
@@ -223,6 +226,16 @@ def _valid_iso_datetime(value: str) -> bool:
         return True
     except ValueError:
         return False
+
+
+def _uuid_string(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = uuid.UUID(value)
+    except ValueError:
+        return None
+    return str(parsed) if str(parsed) == value.lower() else None
 
 
 __all__ = [

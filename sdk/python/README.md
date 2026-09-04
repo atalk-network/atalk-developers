@@ -122,6 +122,9 @@ package versions, and restarts the locally supplied command. It never evaluates 
 name from the server. Credentials and runtime state remain outside every versioned environment, and
 the child never inherits `ATALK_AGENT_TOKEN`.
 
+Only a sidecar written by the currently supervised process and per-launch identifier is actionable.
+Advisories older than 12 hours (or dated more than five minutes in the future) are diagnostic only.
+
 The owner's policy in aTalk controls automation: **Notify** only reports, **Security** permits only a
 security update, and **Compatible** permits updates inside the current compatible line. The manager's
 local `--update-ceiling` defaults to `COMPATIBLE`, letting that owner choice govern, but an operator can
