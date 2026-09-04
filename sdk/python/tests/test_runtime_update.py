@@ -109,12 +109,13 @@ def test_persists_private_atomic_supervisor_handoff(tmp_path, monkeypatch):
     metadata = resolve_runtime_check_in()
     parsed = parse_runtime_update_advisory(advisory())
     assert parsed is not None
-    persist_runtime_update_status(path, metadata, parsed)
+    persist_runtime_update_status(path, metadata, parsed, writer_peer_id="peer-1")
     value = json.loads(path.read_text())
     assert value == {
         "version": 1,
         "writerProcessId": os.getpid(),
         "writerLaunchId": launch_id,
+        "writerPeerId": "peer-1",
         "metadata": metadata.to_wire(),
         "advisory": parsed.to_wire(),
     }
@@ -160,6 +161,7 @@ async def test_check_in_is_advisory_private_and_emits_only_material_changes(tmp_
     assert json.loads((tmp_path / "update.json").read_text())["advisory"]["checkedAt"] == (
         "2026-09-04T18:00:00.000Z"
     )
+    assert json.loads((tmp_path / "update.json").read_text())["writerPeerId"] == "agent"
 
 
 @pytest.mark.asyncio

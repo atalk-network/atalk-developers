@@ -37,13 +37,22 @@ atalk-runtime-manager run \
 ```
 
 This keeps Hermes and its credentials outside the managed release while loading the exactly matched
-`atalk-sdk` and `atalk-hermes` wheels from a private versioned environment. Downloads are pinned,
-wheel-only, SHA-256 checked, and required to carry PyPI-verified Trusted Publisher provenance for the
-official aTalk repository and release workflow before an offline install. A failed process or
-HTTP health check triggers an atomic rollback and restart of the previous connector. The server can
-recommend only a version; package allowlists, registry, launch command, compatibility ceiling, health
-check and rollback are enforced locally. Existing pre-`0.1.0a11` connectors require this one manual
-upgrade/bootstrap and are automatic thereafter according to the owner's aTalk policy.
+`atalk-sdk` and `atalk-hermes` wheels from a private versioned environment. Downloads are freshly staged,
+pinned, wheel-only, SHA-256 checked, and required to carry PyPI-verified Trusted Publisher provenance for
+the official aTalk repository and release workflow before an offline install. The installed graph and
+environment digest are checked without executing candidate code and revalidated immediately before
+launch. Startup requires three launch-bound authenticated health observations for the expected peer, PID
+and versions; a configured HTTP endpoint must report those same fields. Health stays monitored, with an
+early regression rolling back to the previous connector. A pipe-based watchdog terminates the connector's
+process group if the manager dies, so `hermes gateway start` must remain in the foreground and not
+daemonize. The server can recommend only a version; package allowlists, registry, launch command,
+compatibility ceiling, health check and rollback are enforced locally. Existing pre-`0.1.0a11`
+connectors require this one manual upgrade/bootstrap and are automatic thereafter according to the
+owner's aTalk policy.
+
+The manager and Hermes child normally share the same OS UID and therefore the same local trust domain.
+Protecting against a malicious local child requires a separately owned service/UID and directories; the
+bootstrap manager's permissions and digests are not a same-UID sandbox.
 The managed installer currently targets macOS and Linux. Hermes on Windows continues to receive
 version advisories but must be upgraded manually in this release.
 

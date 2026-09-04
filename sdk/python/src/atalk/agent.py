@@ -663,6 +663,11 @@ class Agent:
                     self._runtime_update_status_path,
                     self._runtime_check_in,
                     advisory,
+                    writer_peer_id=(
+                        str(self._credentials.peer["id"])
+                        if self._credentials and isinstance(self._credentials.peer.get("id"), str)
+                        else None
+                    ),
                 )
             if changed and self._runtime_update_handler:
                 # Consumer callbacks are advisory UI/automation hooks. Dispatch

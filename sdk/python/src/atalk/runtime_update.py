@@ -145,7 +145,11 @@ def parse_runtime_update_advisory(value: Any) -> RuntimeUpdateAdvisory | None:
 
 
 def persist_runtime_update_status(
-    path: str | Path, metadata: RuntimeCheckIn, advisory: RuntimeUpdateAdvisory,
+    path: str | Path,
+    metadata: RuntimeCheckIn,
+    advisory: RuntimeUpdateAdvisory,
+    *,
+    writer_peer_id: str | None = None,
 ) -> None:
     target = Path(path).expanduser().resolve()
     target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -154,6 +158,7 @@ def persist_runtime_update_status(
         "version": 1,
         "writerProcessId": os.getpid(),
         **({"writerLaunchId": launch_id} if launch_id else {}),
+        **({"writerPeerId": writer_peer_id} if _peer_id_string(writer_peer_id) else {}),
         "metadata": metadata.to_wire(),
         "advisory": advisory.to_wire(),
     }
@@ -236,6 +241,15 @@ def _uuid_string(value: Any) -> str | None:
     except ValueError:
         return None
     return str(parsed) if str(parsed) == value.lower() else None
+
+
+def _peer_id_string(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    if not 1 <= len(normalized) <= 200 or any(character.isspace() for character in normalized):
+        return None
+    return normalized
 
 
 __all__ = [

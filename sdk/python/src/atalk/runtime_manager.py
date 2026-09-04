@@ -10,11 +10,16 @@ from __future__ import annotations
 import argparse
 import base64
 import contextlib
+import errno
+from email.parser import BytesParser
+from email.policy import compat32
 import hashlib
 import hmac
+import importlib.metadata
 import json
 import os
 import re
+import select
 import shutil
 import signal
 import stat
@@ -23,6 +28,7 @@ import sys
 import time
 import uuid
 import venv
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterator, Literal, Sequence
@@ -44,6 +50,11 @@ MAX_STATUS_BYTES = 64 * 1024
 MAX_TRACKED_UPDATE_FAILURES = 32
 MAX_ADVISORY_AGE_SECONDS = 12 * 60 * 60
 MAX_ADVISORY_FUTURE_SKEW_SECONDS = 5 * 60
+MAX_RELEASE_MANIFEST_BYTES = 4 * 1024 * 1024
+MIN_HEALTH_OBSERVATIONS = 3
+MAX_MONITOR_FAILURES = 3
+POST_ACTIVATION_ROLLBACK_SECONDS = 5 * 60
+RUNTIME_RESTART_BACKOFF_SECONDS = (2, 5, 15, 60, 5 * 60)
 STAGING_BACKOFF_SECONDS = (5 * 60, 15 * 60, 60 * 60, 6 * 60 * 60)
 CANDIDATE_BACKOFF_SECONDS = (6 * 60 * 60, 24 * 60 * 60, 3 * 24 * 60 * 60, 7 * 24 * 60 * 60)
 PACKAGE_STACKS: dict[str, tuple[str, ...]] = {
@@ -89,11 +100,12 @@ class UpdateStatus:
     advisory: RuntimeUpdateAdvisory
     writer_process_id: int | None = None
     writer_launch_id: str | None = None
+    writer_peer_id: str | None = None
 
 
 @dataclass(frozen=True)
 class ReconcileResult:
-    process: subprocess.Popen[bytes]
+    process: ManagedProcess
     release: ManagedRelease
     updated: bool
     rolled_back: bool
@@ -126,6 +138,42 @@ ProcessFactory = Callable[..., subprocess.Popen[bytes]]
 ArtifactHashFetcher = Callable[[str, str], dict[str, str]]
 
 
+class _WatchedProcess:
+    """Popen-compatible view of a child owned by the parent-death watchdog."""
+
+    def __init__(self, pid: int, watchdog: subprocess.Popen[bytes], keepalive_descriptor: int):
+        self.pid = pid
+        self._watchdog = watchdog
+        self._keepalive_descriptor = keepalive_descriptor
+
+    @property
+    def returncode(self) -> int | None:
+        return self._watchdog.returncode
+
+    def poll(self) -> int | None:
+        result = self._watchdog.poll()
+        if result is not None:
+            self.close_keepalive()
+        return result
+
+    def wait(self, timeout: float | None = None) -> int:
+        try:
+            return self._watchdog.wait(timeout=timeout)
+        finally:
+            self.close_keepalive()
+
+    def close_keepalive(self) -> None:
+        if self._keepalive_descriptor < 0:
+            return
+        descriptor = self._keepalive_descriptor
+        self._keepalive_descriptor = -1
+        with contextlib.suppress(OSError):
+            os.close(descriptor)
+
+
+ManagedProcess = subprocess.Popen[bytes] | _WatchedProcess
+
+
 class RuntimeManager:
     def __init__(
         self,
@@ -145,7 +193,7 @@ class RuntimeManager:
         shutdown_timeout_seconds: float = 10.0,
         update_ceiling: Literal["NOTIFY", "SECURITY", "COMPATIBLE"] = "COMPATIBLE",
         command_runner: CommandRunner = subprocess.run,
-        process_factory: ProcessFactory = subprocess.Popen,
+        process_factory: ProcessFactory | None = None,
         artifact_hash_fetcher: ArtifactHashFetcher | None = None,
         clock: Callable[[], float] = time.time,
     ):
@@ -164,7 +212,7 @@ class RuntimeManager:
         credential = _absolute_path(credential_path)
         releases = base / "releases"
         try:
-            credential.relative_to(releases)
+            credential.resolve(strict=False).relative_to(releases)
         except ValueError:
             pass
         else:
@@ -198,74 +246,133 @@ class RuntimeManager:
         self._clock = clock
         self._stopping = False
         self._process_launch_ids: dict[int, str] = {}
+        self._process_versions: dict[int, str] = {}
+        self._process_peer_ids: dict[int, str] = {}
+        self._process_started_at: dict[int, float] = {}
+        self._lock_descriptor: int | None = None
 
     def run(self) -> int:
+        if os.name != "posix":
+            raise RuntimeManagerError(
+                "The managed Python/Hermes Runtime Manager currently requires macOS or Linux"
+            )
         self._prepare_private_directories()
         self._validate_paired_credentials()
-        with _exclusive_lock(self.paths.lock), _termination_handlers(self):
-            release = self._load_current_release() or self.stage(self.initial_version)
-            self._write_pointer(release)
-            process = self.launch(release)
-            if not self.health_check(process):
-                self.stop_process(process)
-                raise RuntimeManagerError(f"Initial runtime {release.version} did not pass its health check")
-            self._write_state("RUNNING", release, process.pid)
+        with _exclusive_lock(self.paths.lock) as lock_descriptor, _termination_handlers(self):
+            self._lock_descriptor = lock_descriptor
             try:
-                while not self._stopping:
-                    if process.poll() is not None:
-                        self._write_state("RESTARTING", release, None, detail=f"exit={process.returncode}")
-                        time.sleep(min(2.0, self.poll_interval_seconds))
-                        process = self.launch(release)
-                        if not self.health_check(process):
-                            self.stop_process(process)
-                            raise RuntimeManagerError(f"Runtime {release.version} repeatedly failed health checks")
-                        self._write_state("RUNNING", release, process.pid)
-                    update = self.read_update_status()
-                    if (
-                        update
-                        and self._status_is_actionable(update, process, release.version)
-                        and self.should_auto_update(update, release.version)
-                    ):
-                        target_version = update.advisory.recommended_version or ""
-                        deferred = self.update_deferment(target_version)
-                        if deferred:
-                            self._write_state(
-                                "UPDATE_DEFERRED", release, process.pid, update_failure=deferred,
-                            )
-                            time.sleep(self.poll_interval_seconds)
-                            continue
-                        try:
-                            result = self.reconcile(process, release, target_version)
-                            process, release = result.process, result.release
-                        except RuntimeManagerError as error:
-                            # A registry/staging failure leaves the current process untouched.
-                            # A failed rollback only reaches here if the prior process could not
-                            # be relaunched, in which case the monitor exits explicitly.
-                            if process.poll() is not None:
-                                raise
-                            failure = self.update_deferment(target_version, include_expired=True)
-                            self._write_state(
-                                "UPDATE_DEFERRED", release, process.pid,
-                                detail=type(error).__name__, update_failure=failure,
-                            )
-                    time.sleep(self.poll_interval_seconds)
-            except KeyboardInterrupt:
-                self._stopping = True
+                self._recover_stale_runtime()
+                pointer_version = self._load_pointer_version() or self.initial_version
+                release = self._load_current_release()
+                if release is None:
+                    release = self.stage(pointer_version)
+                self._write_pointer(release)
+                process = self._restart_until_healthy(release, reason="initial_start")
+                if process is None:
+                    self._write_state("STOPPED", release, None)
+                    return 0
+                monitor_failures = 0
+                rollback_release: ManagedRelease | None = None
+                rollback_deadline = 0.0
+                try:
+                    while not self._stopping:
+                        runtime_failure: str | None = None
+                        if process.poll() is not None:
+                            runtime_failure = f"exit={process.returncode}"
+                        elif not self.health_snapshot(process):
+                            monitor_failures += 1
+                            if monitor_failures >= MAX_MONITOR_FAILURES:
+                                runtime_failure = "runtime_health_lost"
+                        else:
+                            monitor_failures = 0
+                            if rollback_release and self._clock() > rollback_deadline:
+                                rollback_release = None
+                                rollback_deadline = 0.0
+                        if runtime_failure:
+                            if rollback_release and self._clock() <= rollback_deadline:
+                                try:
+                                    process, release = self._rollback_monitored_candidate(
+                                        process, release, rollback_release,
+                                    )
+                                except RuntimeManagerError:
+                                    release = rollback_release
+                                    replacement = self._restart_until_healthy(
+                                        release, reason="post_activation_rollback_failed",
+                                    )
+                                    if replacement is None:
+                                        break
+                                    process = replacement
+                                rollback_release = None
+                                rollback_deadline = 0.0
+                            else:
+                                self._write_state(
+                                    "RESTARTING", release,
+                                    process.pid if process.poll() is None else None,
+                                    detail=runtime_failure,
+                                )
+                                self.stop_process(process)
+                                replacement = self._restart_until_healthy(
+                                    release, reason=runtime_failure,
+                                )
+                                if replacement is None:
+                                    break
+                                process = replacement
+                            monitor_failures = 0
+                        update = self.read_update_status()
+                        if (
+                            update
+                            and self._status_is_actionable(update, process, release.version)
+                            and self.should_auto_update(update, release.version)
+                        ):
+                            target_version = update.advisory.recommended_version or ""
+                            deferred = self.update_deferment(target_version)
+                            if deferred:
+                                self._write_state(
+                                    "UPDATE_DEFERRED", release, process.pid, update_failure=deferred,
+                                )
+                                time.sleep(self.poll_interval_seconds)
+                                continue
+                            previous_release = release
+                            try:
+                                result = self.reconcile(process, release, target_version)
+                                process, release = result.process, result.release
+                                if result.updated:
+                                    rollback_release = previous_release
+                                    rollback_deadline = self._clock() + POST_ACTIVATION_ROLLBACK_SECONDS
+                            except RuntimeManagerError as error:
+                                # A registry/staging failure leaves the current process untouched.
+                                # A failed rollback only reaches here if the prior process could not
+                                # be relaunched, in which case the monitor exits explicitly.
+                                if process.poll() is not None:
+                                    replacement = self._restart_until_healthy(
+                                        release, reason="update_rollback_failed",
+                                    )
+                                    if replacement is None:
+                                        break
+                                    process = replacement
+                                else:
+                                    failure = self.update_deferment(target_version, include_expired=True)
+                                    self._write_state(
+                                        "UPDATE_DEFERRED", release, process.pid,
+                                        detail=type(error).__name__, update_failure=failure,
+                                    )
+                        time.sleep(self.poll_interval_seconds)
+                except KeyboardInterrupt:
+                    self._stopping = True
+                finally:
+                    self.stop_process(process)
+                    self._write_state("STOPPED", release, None)
             finally:
-                self.stop_process(process)
-                self._write_state("STOPPED", release, None)
+                self._lock_descriptor = None
         return 0
 
     def stage(self, version: str) -> ManagedRelease:
         _validate_version(version)
         final = self.paths.releases / version
-        if final.exists():
-            release = self._release_from_path(version, final)
-            self.verify(release)
-            return release
         temporary = self.paths.releases / f".stage-{version}-{uuid.uuid4().hex}"
         try:
             venv.EnvBuilder(with_pip=True, clear=False, symlinks=os.name != "nt").create(temporary)
+            os.chmod(temporary, 0o700)
             release = self._release_from_path(version, temporary)
             pins = self.package_pins(version)
             wheelhouse = temporary / "wheelhouse"
@@ -287,6 +394,7 @@ class RuntimeManager:
                 detail = (completed.stderr or completed.stdout or "pip failed").strip()[-2000:]
                 raise RuntimeManagerError(f"Could not stage aTalk {version}: {detail}")
             artifacts = self._verify_downloaded_wheels(wheelhouse)
+            resolved = _resolved_wheel_graph(artifacts)
             install_command = [
                 str(_venv_python(temporary)), "-I", "-m", "pip", "--isolated", "install",
                 "--disable-pip-version-check", "--no-input", "--only-binary=:all:",
@@ -303,7 +411,9 @@ class RuntimeManager:
             if completed.returncode != 0:
                 detail = (completed.stderr or completed.stdout or "pip failed").strip()[-2000:]
                 raise RuntimeManagerError(f"Could not install verified aTalk {version}: {detail}")
-            self.verify(release)
+            _verify_installed_distributions(release.site_packages, resolved)
+            shutil.rmtree(wheelhouse)
+            tree_digest = _release_tree_digest(temporary)
             _atomic_private_json(temporary / "release.json", {
                 "version": 1,
                 "stack": self.stack,
@@ -311,13 +421,11 @@ class RuntimeManager:
                 "packages": pins,
                 "registry": PYPI_INDEX,
                 "artifacts": artifacts,
+                "resolved": resolved,
+                "treeSha256": tree_digest,
             })
-            shutil.rmtree(wheelhouse)
-            try:
-                os.replace(temporary, final)
-            except OSError:
-                if not final.exists():
-                    raise
+            self.verify(release)
+            _replace_directory(temporary, final)
             release = self._release_from_path(version, final)
             self.verify(release)
             return release
@@ -338,6 +446,12 @@ class RuntimeManager:
             if not wheel.is_file() or wheel.suffix != ".whl":
                 raise RuntimeManagerError(f"PyPI resolution included a non-wheel artifact: {wheel.name}")
             package, version = _wheel_distribution_and_version(wheel.name)
+            metadata_package, metadata_version = _wheel_metadata_identity(wheel)
+            if (
+                _normalize_distribution(metadata_package) != _normalize_distribution(package)
+                or metadata_version != version
+            ):
+                raise RuntimeManagerError(f"Wheel filename and internal package identity disagree: {wheel.name}")
             expected = self._artifact_hash_fetcher(package, version).get(wheel.name)
             digest = _sha256_file(wheel)
             if not expected or not _constant_time_digest(expected, digest):
@@ -353,32 +467,63 @@ class RuntimeManager:
 
     def verify(self, release: ManagedRelease) -> None:
         _validate_version(release.version)
-        script = (
-            "import importlib.metadata,json,sys;"
-            f"p={json.dumps(list(PACKAGE_STACKS[self.stack]))};"
-            "print(json.dumps({n:importlib.metadata.version(n) for n in p},sort_keys=True))"
-        )
-        completed = self._command_runner(
-            [str(_venv_python(release.path)), "-I", "-c", script],
-            cwd=release.path,
-            env=_sanitized_install_environment(),
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-        if completed.returncode != 0:
-            raise RuntimeManagerError(f"Staged environment verification failed: {(completed.stderr or '').strip()[-1000:]}")
         try:
-            installed = json.loads(completed.stdout)
-        except (TypeError, json.JSONDecodeError) as error:
-            raise RuntimeManagerError("Staged environment returned invalid package metadata") from error
-        expected = {package: release.version for package in PACKAGE_STACKS[self.stack]}
-        if installed != expected:
-            raise RuntimeManagerError(f"Staged package versions do not match exact pins: {installed!r}")
+            metadata = release.path.lstat()
+        except FileNotFoundError as error:
+            raise RuntimeManagerError("Staged environment is missing") from error
+        if (
+            stat.S_ISLNK(metadata.st_mode)
+            or not stat.S_ISDIR(metadata.st_mode)
+            or metadata.st_uid != os.getuid()
+            or metadata.st_mode & 0o077
+        ):
+            raise RuntimeManagerError("Staged environment must be a private owner-only directory")
+        try:
+            manifest = _read_private_json(release.path / "release.json", MAX_RELEASE_MANIFEST_BYTES)
+        except (FileNotFoundError, OSError, ValueError, json.JSONDecodeError) as error:
+            raise RuntimeManagerError("Staged environment has no trusted release manifest") from error
+        expected_pins = self.package_pins(release.version)
+        artifacts = manifest.get("artifacts")
+        resolved = manifest.get("resolved")
+        tree_digest = manifest.get("treeSha256")
+        if (
+            manifest.get("version") != 1
+            or manifest.get("stack") != self.stack
+            or manifest.get("release") != release.version
+            or manifest.get("packages") != expected_pins
+            or manifest.get("registry") != PYPI_INDEX
+            or not isinstance(artifacts, dict)
+            or not artifacts
+            or any(
+                not isinstance(name, str)
+                or not isinstance(digest, str)
+                or not _constant_time_digest(digest, digest)
+                for name, digest in artifacts.items()
+            )
+            or not isinstance(resolved, dict)
+            or any(not isinstance(name, str) or not isinstance(version, str) for name, version in resolved.items())
+            or not isinstance(tree_digest, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", tree_digest)
+        ):
+            raise RuntimeManagerError("Staged environment release manifest is invalid")
+        if _resolved_wheel_graph(artifacts) != resolved:
+            raise RuntimeManagerError("Staged environment resolved graph does not match its verified artifacts")
+        for package in PACKAGE_STACKS[self.stack]:
+            if resolved.get(_normalize_distribution(package)) != release.version:
+                raise RuntimeManagerError("Staged environment omitted an exact allowlisted package")
+        _verify_installed_distributions(release.site_packages, resolved)
+        actual_tree_digest = _release_tree_digest(release.path)
+        if not hmac.compare_digest(tree_digest, actual_tree_digest):
+            raise RuntimeManagerError("Staged environment content no longer matches its trusted manifest")
 
-    def launch(self, release: ManagedRelease) -> subprocess.Popen[bytes]:
+    def launch(self, release: ManagedRelease) -> ManagedProcess:
+        # Revalidate from the manager process immediately before every launch.
+        # Candidate code is never executed to attest its own identity or bytes.
+        self.verify(release)
         self._validate_paired_credentials()
+        peer_id = self._credential_peer_id()
         launch_id = str(uuid.uuid4())
+        launched_at = self._clock()
         environment = os.environ.copy()
         environment.pop("ATALK_AGENT_TOKEN", None)
         environment.pop("ATALK_ACTIVATION_TOKEN", None)
@@ -395,61 +540,140 @@ class RuntimeManager:
         environment["PATH"] = os.pathsep.join([
             str(_venv_bin(release.path)), environment.get("PATH", ""),
         ])
-        process = self._process_factory(
-            list(self.command),
-            cwd=self.working_directory,
-            env=environment,
-            start_new_session=os.name != "nt",
-        )
+        if self._process_factory is not None:
+            process: ManagedProcess = self._process_factory(
+                list(self.command),
+                cwd=self.working_directory,
+                env=environment,
+                start_new_session=True,
+            )
+        else:
+            process = _launch_with_parent_watchdog(
+                self.command,
+                cwd=self.working_directory,
+                environment=environment,
+                shutdown_timeout_seconds=self.shutdown_timeout_seconds,
+                lock_descriptor=self._lock_descriptor,
+            )
         self._process_launch_ids[process.pid] = launch_id
+        self._process_versions[process.pid] = release.version
+        self._process_peer_ids[process.pid] = peer_id
+        self._process_started_at[process.pid] = launched_at
         return process
 
-    def health_check(self, process: subprocess.Popen[bytes]) -> bool:
+    def health_check(self, process: ManagedProcess) -> bool:
         started = time.monotonic()
         deadline = started + self.health_timeout_seconds
-        while time.monotonic() < deadline:
-            if process.poll() is not None:
-                return False
+        ready_observations = 0
+        while not self._stopping and time.monotonic() < deadline:
             elapsed = time.monotonic() - started
-            if self.health_url:
-                try:
-                    request = Request(self.health_url, method="GET", headers={"user-agent": "atalk-runtime-manager/1"})
-                    with urlopen(request, timeout=min(2.0, max(0.2, deadline - time.monotonic()))) as response:
-                        # A single fast 2xx is not enough: a candidate may bind
-                        # briefly and crash immediately afterwards. Reuse the
-                        # configured startup grace as a minimum probation period.
-                        if _health_response_is_ready(response) and elapsed >= self.health_grace_seconds:
-                            return True
-                except OSError:
-                    pass
-            elif elapsed >= self.health_grace_seconds:
-                return True
+            if self.health_snapshot(
+                process,
+                request_timeout=min(2.0, max(0.2, deadline - time.monotonic())),
+            ):
+                ready_observations += 1
+                if ready_observations >= MIN_HEALTH_OBSERVATIONS and elapsed >= self.health_grace_seconds:
+                    return True
+            else:
+                ready_observations = 0
+                if process.poll() is not None:
+                    return False
             time.sleep(0.2)
         return False
 
-    def stop_process(self, process: subprocess.Popen[bytes]) -> None:
+    def health_snapshot(self, process: ManagedProcess, *, request_timeout: float = 2.0) -> bool:
         if process.poll() is not None:
+            return False
+        version = self._process_versions.get(process.pid)
+        if not version:
+            return False
+        status = self.read_update_status()
+        if not status or not self._status_is_from_current_launch(status, process, version):
+            return False
+        if not self.health_url:
+            return True
+        try:
+            request = Request(self.health_url, method="GET", headers={"user-agent": "atalk-runtime-manager/1"})
+            with urlopen(request, timeout=request_timeout) as response:
+                return _health_response_is_ready(
+                    response,
+                    expected_process_id=process.pid,
+                    expected_version=version,
+                    expected_peer_id=self._process_peer_ids.get(process.pid),
+                    stack=self.stack,
+                )
+        except (OSError, ValueError):
+            return False
+
+    def stop_process(self, process: ManagedProcess) -> None:
+        if process.poll() is not None:
+            if isinstance(process, _WatchedProcess):
+                process.close_keepalive()
+            self._forget_process(process.pid)
             return
         try:
-            if os.name != "nt":
-                os.killpg(process.pid, signal.SIGTERM)
-            else:
-                process.terminate()
+            os.killpg(process.pid, signal.SIGTERM)
             process.wait(timeout=self.shutdown_timeout_seconds)
         except (ProcessLookupError, subprocess.TimeoutExpired):
             if process.poll() is None:
                 try:
-                    if os.name != "nt":
-                        os.killpg(process.pid, signal.SIGKILL)
-                    else:
-                        process.kill()
+                    os.killpg(process.pid, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
                 with contextlib.suppress(subprocess.TimeoutExpired):
                     process.wait(timeout=2)
+        finally:
+            if isinstance(process, _WatchedProcess):
+                process.close_keepalive()
+                with contextlib.suppress(subprocess.TimeoutExpired):
+                    process.wait(timeout=2)
+            self._forget_process(process.pid)
+
+    def _forget_process(self, process_id: int) -> None:
+        self._process_launch_ids.pop(process_id, None)
+        self._process_versions.pop(process_id, None)
+        self._process_peer_ids.pop(process_id, None)
+        self._process_started_at.pop(process_id, None)
+
+    def _restart_until_healthy(self, release: ManagedRelease, *, reason: str) -> ManagedProcess | None:
+        attempt = 0
+        while not self._stopping:
+            process: ManagedProcess | None = None
+            try:
+                process = self.launch(release)
+                if self.health_check(process):
+                    self._write_state(
+                        "RUNNING", release, process.pid,
+                        detail=(f"recovered_after={attempt}; reason={reason}" if attempt else None),
+                    )
+                    return process
+            except Exception:
+                if process is not None:
+                    self.stop_process(process)
+            else:
+                if process is not None:
+                    self.stop_process(process)
+            delay = RUNTIME_RESTART_BACKOFF_SECONDS[
+                min(attempt, len(RUNTIME_RESTART_BACKOFF_SECONDS) - 1)
+            ]
+            attempt += 1
+            self._write_state(
+                "RESTARTING", release, None,
+                detail=f"reason={reason}; attempt={attempt}; retry_seconds={delay}",
+            )
+            self._interruptible_sleep(delay)
+        return None
+
+    def _interruptible_sleep(self, seconds: float) -> None:
+        deadline = time.monotonic() + seconds
+        while not self._stopping:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            time.sleep(min(0.5, remaining))
 
     def reconcile(
-        self, process: subprocess.Popen[bytes], current: ManagedRelease, target_version: str,
+        self, process: ManagedProcess, current: ManagedRelease, target_version: str,
     ) -> ReconcileResult:
         # Staging and exact-version verification happen while the current runtime stays online.
         try:
@@ -466,7 +690,7 @@ class RuntimeManager:
             return ReconcileResult(process, current, updated=False, rolled_back=False)
         self._write_state("SWITCHING", current, process.pid, detail=f"target={candidate.version}")
         self.stop_process(process)
-        candidate_process: subprocess.Popen[bytes] | None = None
+        candidate_process: ManagedProcess | None = None
         try:
             self._write_pointer(candidate)
             candidate_process = self.launch(candidate)
@@ -481,13 +705,25 @@ class RuntimeManager:
             # Rollback is operational, not cosmetic: restore the pointer and restart
             # the last-known-good process before returning control to the monitor.
             self._write_pointer(current)
-            rollback_process = self.launch(current)
-            rollback_healthy = self.health_check(rollback_process)
             failure = self._record_update_failure(
                 candidate.version,
                 "CANDIDATE",
                 "candidate_health_or_switch_failed",
             )
+            rollback_process: ManagedProcess | None = None
+            try:
+                rollback_process = self.launch(current)
+                rollback_healthy = self.health_check(rollback_process)
+            except Exception as rollback_error:
+                self._write_state(
+                    "ROLLBACK_DEGRADED", current, None,
+                    detail=(f"candidate={candidate.version}; error={type(update_error).__name__}; "
+                            f"rollback={type(rollback_error).__name__}"),
+                    update_failure=failure,
+                )
+                raise RuntimeManagerError(
+                    f"Update failed and previous runtime {current.version} could not be relaunched"
+                ) from rollback_error
             self._write_state(
                 "ROLLED_BACK" if rollback_healthy else "ROLLBACK_DEGRADED",
                 current,
@@ -495,6 +731,11 @@ class RuntimeManager:
                 detail=f"candidate={candidate.version}; error={type(update_error).__name__}",
                 update_failure=failure,
             )
+            if not rollback_healthy:
+                self.stop_process(rollback_process)
+                raise RuntimeManagerError(
+                    f"Update failed and previous runtime {current.version} remained unhealthy"
+                ) from update_error
             if rollback_process.poll() is not None:
                 raise RuntimeManagerError(
                     f"Update failed and previous runtime {current.version} could not be restarted"
@@ -593,35 +834,59 @@ class RuntimeManager:
         advisory = parse_runtime_update_advisory(value.get("advisory"))
         writer_process_id = value.get("writerProcessId")
         writer_launch_id = value.get("writerLaunchId")
+        writer_peer_id = value.get("writerPeerId")
         if not isinstance(writer_process_id, int) or isinstance(writer_process_id, bool) or writer_process_id <= 0:
             writer_process_id = None
         if not isinstance(writer_launch_id, str) or not _is_uuid(writer_launch_id):
             writer_launch_id = None
+        if (
+            not isinstance(writer_peer_id, str)
+            or not 1 <= len(writer_peer_id) <= 200
+            or any(character.isspace() for character in writer_peer_id)
+        ):
+            writer_peer_id = None
         return UpdateStatus(
             metadata=metadata,
             advisory=advisory,
             writer_process_id=writer_process_id,
             writer_launch_id=writer_launch_id,
+            writer_peer_id=writer_peer_id,
         ) if advisory else None
 
     def _status_is_actionable(
         self,
         status: UpdateStatus,
-        process: subprocess.Popen[bytes],
+        process: ManagedProcess,
+        current_version: str,
+    ) -> bool:
+        return (
+            status.advisory.current_version == current_version
+            and self._status_is_from_current_launch(status, process, current_version)
+        )
+
+    def _status_is_from_current_launch(
+        self,
+        status: UpdateStatus,
+        process: ManagedProcess,
         current_version: str,
     ) -> bool:
         launch_id = self._process_launch_ids.get(process.pid)
+        expected_peer_id = self._process_peer_ids.get(process.pid)
+        launched_at = self._process_started_at.get(process.pid)
         sdk = status.metadata.get("sdk")
         integration = status.metadata.get("integration")
         if (
-            status.writer_process_id != process.pid
+            process.poll() is not None
+            or status.writer_process_id != process.pid
             or not launch_id
             or status.writer_launch_id != launch_id
+            or not expected_peer_id
+            or status.writer_peer_id != expected_peer_id
+            or launched_at is None
             or not isinstance(sdk, dict)
             or sdk.get("version") != current_version
             or not isinstance(integration, dict)
-            or integration.get("version") != current_version
-            or status.advisory.current_version != current_version
+            or (self.stack == "hermes" and integration.get("version") != current_version)
         ):
             return False
         try:
@@ -632,6 +897,7 @@ class RuntimeManager:
         return (
             checked_at >= now - MAX_ADVISORY_AGE_SECONDS
             and checked_at <= now + MAX_ADVISORY_FUTURE_SKEW_SECONDS
+            and checked_at >= launched_at - MAX_ADVISORY_FUTURE_SKEW_SECONDS
         )
 
     def should_auto_update(self, status: UpdateStatus, current_version: str) -> bool:
@@ -674,6 +940,21 @@ class RuntimeManager:
         ):
             raise RuntimeManagerError("Agent credentials must be a private owner-only regular file")
 
+    def _credential_peer_id(self) -> str:
+        try:
+            value = _read_private_json(self.paths.credential, 1024 * 1024)
+        except (FileNotFoundError, OSError, ValueError, json.JSONDecodeError) as error:
+            raise RuntimeManagerError("Agent credentials could not be read safely") from error
+        peer = value.get("peer")
+        peer_id = peer.get("id") if isinstance(peer, dict) else None
+        if (
+            not isinstance(peer_id, str)
+            or not 1 <= len(peer_id) <= 200
+            or any(character.isspace() for character in peer_id)
+        ):
+            raise RuntimeManagerError("Agent credentials do not contain a valid paired peer identity")
+        return peer_id
+
     def _release_from_path(self, version: str, path: Path) -> ManagedRelease:
         if os.name == "nt":
             site_packages = path / "Lib" / "site-packages"
@@ -682,6 +963,17 @@ class RuntimeManager:
         return ManagedRelease(version=version, path=path, site_packages=site_packages)
 
     def _load_current_release(self) -> ManagedRelease | None:
+        version = self._load_pointer_version()
+        if version is None:
+            return None
+        try:
+            release = self._release_from_path(version, self.paths.releases / version)
+            self.verify(release)
+            return release
+        except (ValueError, RuntimeManagerError):
+            return None
+
+    def _load_pointer_version(self) -> str | None:
         try:
             value = _read_private_json(self.paths.pointer, 4096)
         except (FileNotFoundError, OSError, ValueError, json.JSONDecodeError):
@@ -691,11 +983,56 @@ class RuntimeManager:
             return None
         try:
             _validate_version(version)
-            release = self._release_from_path(version, self.paths.releases / version)
-            self.verify(release)
-            return release
-        except (ValueError, RuntimeManagerError):
+            return version
+        except ValueError:
             return None
+
+    def _recover_stale_runtime(self) -> None:
+        """Never signal a PID from stale state; fail closed if it may still be live."""
+        try:
+            value = _read_private_json(self.paths.state, MAX_STATUS_BYTES)
+        except (FileNotFoundError, OSError, ValueError, json.JSONDecodeError):
+            return
+        process_id = value.get("pid")
+        if (
+            value.get("status") == "STOPPED"
+            or not isinstance(process_id, int)
+            or isinstance(process_id, bool)
+            or process_id <= 0
+            or not _pid_exists(process_id)
+        ):
+            return
+        raise RuntimeManagerError(
+            "A previously recorded runtime process may still be alive; refusing to signal a possibly reused PID. "
+            "Stop that process explicitly, then start the Runtime Manager again"
+        )
+
+    def _rollback_monitored_candidate(
+        self,
+        process: ManagedProcess,
+        candidate: ManagedRelease,
+        previous: ManagedRelease,
+    ) -> tuple[ManagedProcess, ManagedRelease]:
+        self.stop_process(process)
+        self._write_pointer(previous)
+        failure = self._record_update_failure(
+            candidate.version, "CANDIDATE", "candidate_health_or_switch_failed",
+        )
+        rollback_process = self.launch(previous)
+        healthy = self.health_check(rollback_process)
+        self._write_state(
+            "ROLLED_BACK" if healthy else "ROLLBACK_DEGRADED",
+            previous,
+            rollback_process.pid if rollback_process.poll() is None else None,
+            detail=f"candidate={candidate.version}; error=post_activation_health_lost",
+            update_failure=failure,
+        )
+        if not healthy:
+            self.stop_process(rollback_process)
+            raise RuntimeManagerError(
+                f"Candidate {candidate.version} lost health and previous runtime {previous.version} did not recover"
+            )
+        return rollback_process, previous
 
     def _write_pointer(self, release: ManagedRelease) -> None:
         _atomic_private_json(self.paths.pointer, {
@@ -829,6 +1166,144 @@ def _wheel_distribution_and_version(filename: str) -> tuple[str, str]:
     return parts[0].replace("_", "-"), parts[1]
 
 
+def _wheel_metadata_identity(path: Path) -> tuple[str, str]:
+    try:
+        with zipfile.ZipFile(path) as archive:
+            names = [name for name in archive.namelist() if name.endswith(".dist-info/METADATA")]
+            if len(names) != 1:
+                raise RuntimeManagerError(f"Wheel has an ambiguous package identity: {path.name}")
+            metadata_bytes = archive.read(names[0])
+    except (OSError, KeyError, zipfile.BadZipFile) as error:
+        raise RuntimeManagerError(f"Could not inspect wheel metadata: {path.name}") from error
+    if len(metadata_bytes) > 1024 * 1024:
+        raise RuntimeManagerError(f"Wheel metadata is unexpectedly large: {path.name}")
+    metadata = BytesParser(policy=compat32).parsebytes(metadata_bytes, headersonly=True)
+    name = metadata.get("Name")
+    version = metadata.get("Version")
+    if not isinstance(name, str) or not name.strip() or not isinstance(version, str) or not version.strip():
+        raise RuntimeManagerError(f"Wheel metadata omitted package identity: {path.name}")
+    return name.strip(), version.strip()
+
+
+def _resolved_wheel_graph(artifacts: dict[str, str]) -> dict[str, str]:
+    resolved: dict[str, str] = {}
+    for filename in artifacts:
+        package, version = _wheel_distribution_and_version(filename)
+        normalized = _normalize_distribution(package)
+        if normalized in resolved:
+            raise RuntimeManagerError(f"PyPI resolution returned duplicate wheels for {normalized}")
+        resolved[normalized] = version
+    return dict(sorted(resolved.items()))
+
+
+def _verify_installed_distributions(site_packages: Path, expected: dict[str, str]) -> None:
+    if not site_packages.is_dir():
+        raise RuntimeManagerError("Staged environment has no site-packages directory")
+    installed: dict[str, str] = {}
+    try:
+        distributions = importlib.metadata.distributions(path=[str(site_packages)])
+        for distribution in distributions:
+            name = distribution.metadata.get("Name")
+            version = distribution.version
+            if not isinstance(name, str) or not name.strip() or not isinstance(version, str):
+                raise RuntimeManagerError("Staged environment contains invalid distribution metadata")
+            normalized = _normalize_distribution(name)
+            if normalized in installed:
+                raise RuntimeManagerError(f"Staged environment contains duplicate metadata for {normalized}")
+            installed[normalized] = version
+    except (OSError, ValueError) as error:
+        raise RuntimeManagerError("Could not inspect staged distribution metadata") from error
+    # A fresh venv may contain these bootstrap tools before the verified wheel
+    # graph is installed. No other undeclared distribution is accepted.
+    for bootstrap in ("pip", "setuptools"):
+        if bootstrap not in expected:
+            installed.pop(bootstrap, None)
+    if installed != expected:
+        raise RuntimeManagerError(
+            f"Staged distribution graph does not match verified wheel artifacts: {installed!r}"
+        )
+
+
+def _release_tree_digest(root: Path) -> str:
+    digest = hashlib.sha256()
+    try:
+        for directory, directory_names, file_names in os.walk(root, topdown=True, followlinks=False):
+            base = Path(directory)
+            directory_names[:] = sorted(name for name in directory_names if name != "__pycache__")
+            for name in list(directory_names):
+                path = base / name
+                if path.is_symlink():
+                    directory_names.remove(name)
+                    _hash_release_entry(digest, root, path)
+            for name in sorted(file_names):
+                if name == "release.json" and base == root:
+                    continue
+                if name.endswith(".pyc"):
+                    continue
+                _hash_release_entry(digest, root, base / name)
+    except OSError as error:
+        raise RuntimeManagerError("Could not hash staged environment content") from error
+    return digest.hexdigest()
+
+
+def _hash_release_entry(digest: Any, root: Path, path: Path) -> None:
+    relative = path.relative_to(root).as_posix().encode("utf-8")
+    metadata = path.lstat()
+    digest.update(len(relative).to_bytes(8, "big"))
+    digest.update(relative)
+    digest.update(stat.S_IMODE(metadata.st_mode).to_bytes(4, "big"))
+    if stat.S_ISLNK(metadata.st_mode):
+        target = os.readlink(path).encode("utf-8")
+        digest.update(b"L")
+        digest.update(len(target).to_bytes(8, "big"))
+        digest.update(target)
+        return
+    if not stat.S_ISREG(metadata.st_mode):
+        raise RuntimeManagerError(f"Staged environment contains a special file: {path}")
+    digest.update(b"F")
+    digest.update(metadata.st_size.to_bytes(8, "big"))
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+
+
+def _replace_directory(source: Path, destination: Path) -> None:
+    displaced = destination.with_name(f".replaced-{destination.name}-{uuid.uuid4().hex}")
+    moved_existing = False
+    try:
+        try:
+            os.replace(destination, displaced)
+            moved_existing = True
+        except FileNotFoundError:
+            pass
+        os.replace(source, destination)
+        _fsync_directory(destination.parent)
+    except BaseException:
+        if moved_existing and not destination.exists():
+            with contextlib.suppress(OSError):
+                os.replace(displaced, destination)
+        raise
+    finally:
+        if displaced.exists() or displaced.is_symlink():
+            _remove_path(displaced)
+
+
+def _remove_path(path: Path) -> None:
+    metadata = path.lstat()
+    if stat.S_ISDIR(metadata.st_mode) and not stat.S_ISLNK(metadata.st_mode):
+        shutil.rmtree(path)
+    else:
+        path.unlink()
+
+
+def _fsync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 def _normalize_distribution(value: str) -> str:
     return re.sub(r"[-_.]+", "-", value).lower()
 
@@ -960,30 +1435,49 @@ def _trusted_publisher_provenance_matches(value: Any, filename: str, digest: str
     return False
 
 
-def _health_response_is_ready(response: Any) -> bool:
+def _health_response_is_ready(
+    response: Any,
+    *,
+    expected_process_id: int,
+    expected_version: str,
+    expected_peer_id: str | None,
+    stack: Literal["python", "hermes"],
+) -> bool:
     if not 200 <= int(response.status) < 300:
         return False
     try:
         payload = response.read(64 * 1024 + 1)
     except (AttributeError, OSError):
-        return True
+        return False
     if not payload:
-        return True
+        return False
     if len(payload) > 64 * 1024:
         return False
     try:
         value = json.loads(payload)
     except (UnicodeDecodeError, json.JSONDecodeError):
-        return True
+        return False
     if not isinstance(value, dict):
-        return True
-    if isinstance(value.get("connected"), bool) and value["connected"] is not True:
         return False
-    if isinstance(value.get("ok"), bool) and value["ok"] is not True:
-        return False
-    if isinstance(value.get("status"), str) and value["status"].lower() in {"down", "failed", "unhealthy"}:
-        return False
-    return True
+    identity = value.get("identity")
+    runtime = value.get("runtime")
+    metadata = runtime.get("metadata") if isinstance(runtime, dict) else None
+    sdk = metadata.get("sdk") if isinstance(metadata, dict) else None
+    integration = metadata.get("integration") if isinstance(metadata, dict) else None
+    return (
+        value.get("status") == "ok"
+        and value.get("connected") is True
+        and isinstance(identity, dict)
+        and identity.get("id") == expected_peer_id
+        and isinstance(runtime, dict)
+        and runtime.get("processId") == expected_process_id
+        and isinstance(sdk, dict)
+        and sdk.get("name") == "atalk-sdk"
+        and sdk.get("version") == expected_version
+        and isinstance(integration, dict)
+        and integration.get("name") in INTEGRATION_NAMES[stack]
+        and (stack == "python" or integration.get("version") == expected_version)
+    )
 
 
 def _validate_health_url(value: str | None) -> str | None:
@@ -1016,6 +1510,202 @@ def _sanitized_install_environment() -> dict[str, str]:
     environment.pop("PYTHONHOME", None)
     environment.pop("PYTHONPATH", None)
     return environment
+
+
+_WATCHDOG_BOOTSTRAP = (
+    "from atalk.runtime_manager import _watchdog_entry;"
+    "import sys;"
+    "raise SystemExit(_watchdog_entry(int(sys.argv[1]),int(sys.argv[2]),int(sys.argv[3])))"
+)
+
+
+def _launch_with_parent_watchdog(
+    command: Sequence[str],
+    *,
+    cwd: Path | None,
+    environment: dict[str, str],
+    shutdown_timeout_seconds: float,
+    lock_descriptor: int | None,
+) -> _WatchedProcess:
+    if os.name != "posix":
+        raise RuntimeManagerError("The parent-death watchdog requires a POSIX platform")
+    keepalive_read, keepalive_write = os.pipe()
+    config_read, config_write = os.pipe()
+    ready_read, ready_write = os.pipe()
+    passed = [keepalive_read, config_read, ready_write]
+    if lock_descriptor is not None:
+        passed.append(lock_descriptor)
+    watchdog_environment = _sanitized_install_environment()
+    watchdog_environment["PYTHONNOUSERSITE"] = "1"
+    watchdog: subprocess.Popen[bytes] | None = None
+    try:
+        watchdog = subprocess.Popen(
+            [
+                sys.executable,
+                "-I",
+                "-c",
+                _WATCHDOG_BOOTSTRAP,
+                str(keepalive_read),
+                str(config_read),
+                str(ready_write),
+            ],
+            env=watchdog_environment,
+            pass_fds=tuple(passed),
+            start_new_session=False,
+        )
+        os.close(keepalive_read)
+        keepalive_read = -1
+        os.close(config_read)
+        config_read = -1
+        os.close(ready_write)
+        ready_write = -1
+        with os.fdopen(config_write, "w", encoding="utf-8") as handle:
+            config_write = -1
+            json.dump({
+                "command": list(command),
+                "cwd": str(cwd) if cwd else None,
+                "environment": environment,
+                "shutdownTimeoutSeconds": shutdown_timeout_seconds,
+            }, handle)
+        readable, _, _ = select.select([ready_read], [], [], 10.0)
+        if not readable:
+            raise RuntimeManagerError("Parent-death watchdog did not start the runtime in time")
+        with os.fdopen(ready_read, "r", encoding="utf-8") as handle:
+            ready_read = -1
+            line = handle.readline(16 * 1024)
+        try:
+            result = json.loads(line)
+        except json.JSONDecodeError as error:
+            raise RuntimeManagerError("Parent-death watchdog returned invalid startup state") from error
+        process_id = result.get("pid") if isinstance(result, dict) else None
+        if not isinstance(process_id, int) or isinstance(process_id, bool) or process_id <= 0:
+            detail = result.get("error") if isinstance(result, dict) else None
+            raise RuntimeManagerError(
+                f"Parent-death watchdog could not launch the runtime: {detail or 'unknown error'}"
+            )
+        return _WatchedProcess(process_id, watchdog, keepalive_write)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.close(keepalive_write)
+        if watchdog is not None:
+            with contextlib.suppress(ProcessLookupError):
+                watchdog.terminate()
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                watchdog.wait(timeout=2)
+        raise
+    finally:
+        for descriptor in (keepalive_read, config_read, config_write, ready_read, ready_write):
+            if descriptor >= 0:
+                with contextlib.suppress(OSError):
+                    os.close(descriptor)
+
+
+def _watchdog_entry(keepalive_descriptor: int, config_descriptor: int, ready_descriptor: int) -> int:
+    """Internal subprocess entrypoint. EOF from the manager terminates the entire child group."""
+    stop_requested = False
+
+    def request_stop(_signum: int, _frame: Any) -> None:
+        nonlocal stop_requested
+        stop_requested = True
+
+    # A terminal or service manager can signal the manager and watchdog
+    # together. Keep the watchdog alive long enough to reap the child group;
+    # caught handlers reset to defaults when the actual child execs.
+    for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        signal.signal(signum, request_stop)
+    child: subprocess.Popen[bytes] | None = None
+    try:
+        with os.fdopen(config_descriptor, "r", encoding="utf-8") as handle:
+            config = json.load(handle)
+        command = config.get("command") if isinstance(config, dict) else None
+        environment = config.get("environment") if isinstance(config, dict) else None
+        cwd = config.get("cwd") if isinstance(config, dict) else None
+        shutdown_timeout = config.get("shutdownTimeoutSeconds") if isinstance(config, dict) else None
+        if (
+            not isinstance(command, list)
+            or not command
+            or any(not isinstance(item, str) or not item for item in command)
+            or not isinstance(environment, dict)
+            or any(not isinstance(key, str) or not isinstance(value, str) for key, value in environment.items())
+            or (cwd is not None and not isinstance(cwd, str))
+            or not isinstance(shutdown_timeout, (int, float))
+            or isinstance(shutdown_timeout, bool)
+            or shutdown_timeout <= 0
+        ):
+            raise ValueError("invalid watchdog configuration")
+        if stop_requested:
+            raise RuntimeManagerError("watchdog stop requested during startup")
+        child = subprocess.Popen(
+            command,
+            cwd=cwd,
+            env=environment,
+            start_new_session=True,
+            close_fds=True,
+        )
+        _write_watchdog_ready(ready_descriptor, {"pid": child.pid})
+        ready_descriptor = -1
+        while child.poll() is None:
+            if stop_requested:
+                _terminate_process_group(child, float(shutdown_timeout))
+                break
+            readable, _, _ = select.select([keepalive_descriptor], [], [], 0.2)
+            if not readable:
+                continue
+            if os.read(keepalive_descriptor, 1):
+                continue
+            _terminate_process_group(child, float(shutdown_timeout))
+            break
+        return _portable_return_code(child.wait())
+    except BaseException as error:
+        if ready_descriptor >= 0:
+            with contextlib.suppress(OSError):
+                _write_watchdog_ready(ready_descriptor, {"error": type(error).__name__})
+        if child is not None and child.poll() is None:
+            _terminate_process_group(child, 2.0)
+        return 125
+    finally:
+        for descriptor in (keepalive_descriptor, ready_descriptor):
+            if descriptor >= 0:
+                with contextlib.suppress(OSError):
+                    os.close(descriptor)
+
+
+def _write_watchdog_ready(descriptor: int, value: dict[str, Any]) -> None:
+    payload = (json.dumps(value, separators=(",", ":")) + "\n").encode("utf-8")
+    os.write(descriptor, payload)
+    os.close(descriptor)
+
+
+def _terminate_process_group(process: subprocess.Popen[bytes], timeout: float) -> None:
+    if process.poll() is not None:
+        return
+    with contextlib.suppress(ProcessLookupError):
+        os.killpg(process.pid, signal.SIGTERM)
+    try:
+        process.wait(timeout=timeout)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    with contextlib.suppress(ProcessLookupError):
+        os.killpg(process.pid, signal.SIGKILL)
+    with contextlib.suppress(subprocess.TimeoutExpired):
+        process.wait(timeout=2)
+
+
+def _portable_return_code(return_code: int) -> int:
+    if return_code < 0:
+        return 128 + min(127, -return_code)
+    return min(255, return_code)
+
+
+def _pid_exists(process_id: int) -> bool:
+    try:
+        os.kill(process_id, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
 
 
 def _atomic_private_json(path: Path, value: dict[str, Any]) -> None:
@@ -1074,10 +1764,20 @@ def _require_private_directory(path: Path) -> None:
 
 
 @contextlib.contextmanager
-def _exclusive_lock(path: Path) -> Iterator[None]:
+def _exclusive_lock(path: Path) -> Iterator[int]:
     import fcntl
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    descriptor = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags, 0o600)
+    except OSError as error:
+        if error.errno in {errno.ELOOP, errno.EMLINK}:
+            raise RuntimeManagerError("Runtime Manager lock must not be a symbolic link") from error
+        raise
+    metadata = os.fstat(descriptor)
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid():
+        os.close(descriptor)
+        raise RuntimeManagerError("Runtime Manager lock must be an owner-controlled regular file")
     try:
         fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError as error:
@@ -1085,7 +1785,7 @@ def _exclusive_lock(path: Path) -> Iterator[None]:
         raise RuntimeManagerError("Another Runtime Manager already owns this profile") from error
     try:
         os.fchmod(descriptor, 0o600)
-        yield
+        yield descriptor
     finally:
         fcntl.flock(descriptor, fcntl.LOCK_UN)
         os.close(descriptor)

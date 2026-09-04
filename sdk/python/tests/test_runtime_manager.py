@@ -1,10 +1,16 @@
 from __future__ import annotations
 
 import base64
+import io
 import json
 import hashlib
 import os
+import signal
+import subprocess
+import sys
+import time
 import uuid
+import zipfile
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
@@ -20,11 +26,15 @@ from atalk import (
 )
 from atalk.runtime_manager import (
     ManagedRelease,
+    ReconcileResult,
     RuntimeManager,
     RuntimeManagerError,
     UpdateStatus,
     _exclusive_lock,
     _health_response_is_ready,
+    _launch_with_parent_watchdog,
+    _pid_exists,
+    _release_tree_digest,
     _trusted_publisher_provenance_matches,
 )
 
@@ -42,6 +52,17 @@ class FakeProcess:
         return None if self.alive else self.returncode
 
 
+def wheel_fixture(distribution, version="0.1.0a11"):
+    output = io.BytesIO()
+    normalized = distribution.replace("-", "_")
+    with zipfile.ZipFile(output, "w") as archive:
+        archive.writestr(
+            f"{normalized}-{version}.dist-info/METADATA",
+            f"Metadata-Version: 2.1\nName: {distribution}\nVersion: {version}\n\n",
+        )
+    return output.getvalue()
+
+
 def make_manager(tmp_path, **overrides):
     values = {
         "stack": "hermes",
@@ -57,6 +78,42 @@ def make_manager(tmp_path, **overrides):
     }
     values.update(overrides)
     return RuntimeManager(**values)
+
+
+def write_credentials(manager, peer_id="peer-1"):
+    manager.paths.credential.parent.mkdir(parents=True, exist_ok=True)
+    manager.paths.credential.write_text(json.dumps({"peer": {"id": peer_id}}))
+    os.chmod(manager.paths.credential, 0o600)
+
+
+def write_release_fixture(manager, version="0.1.0a11"):
+    release = manager._release_from_path(version, manager.paths.releases / version)
+    release.site_packages.mkdir(parents=True)
+    os.chmod(release.path, 0o700)
+    distribution = release.site_packages / f"atalk_sdk-{version}.dist-info"
+    distribution.mkdir()
+    (distribution / "METADATA").write_text(
+        f"Metadata-Version: 2.1\nName: atalk-sdk\nVersion: {version}\n\n"
+    )
+    (release.site_packages / "atalk.py").write_text("VALUE = 1\n")
+    executable = release.path / "bin" / "python"
+    executable.parent.mkdir()
+    executable.write_text("#!/bin/sh\nexit 99\n")
+    executable.chmod(0o755)
+    artifacts = {f"atalk_sdk-{version}-py3-none-any.whl": "a" * 64}
+    marker = {
+        "version": 1,
+        "stack": "python",
+        "release": version,
+        "packages": [f"atalk-sdk=={version}"],
+        "registry": "https://pypi.org/simple",
+        "artifacts": artifacts,
+        "resolved": {"atalk-sdk": version},
+        "treeSha256": _release_tree_digest(release.path),
+    }
+    (release.path / "release.json").write_text(json.dumps(marker))
+    os.chmod(release.path / "release.json", 0o600)
+    return release
 
 
 def update_status(
@@ -85,6 +142,7 @@ def write_status(manager, *, capabilities=None, policy="COMPATIBLE", severity="I
         manager.paths.update_status,
         metadata,
         update_status(policy=policy, severity=severity),
+        writer_peer_id="peer-1",
     )
 
 
@@ -108,13 +166,96 @@ def test_profile_lock_prevents_two_supervisors(tmp_path):
                 pass
 
 
+def test_profile_lock_rejects_symbolic_links(tmp_path):
+    target = tmp_path / "unrelated"
+    target.write_text("do not chmod or lock me")
+    link = tmp_path / "manager.lock"
+    link.symlink_to(target)
+    with pytest.raises(RuntimeManagerError, match="symbolic link"):
+        with _exclusive_lock(link):
+            pass
+
+
+@pytest.mark.skipif(os.name != "posix", reason="managed process replacement is POSIX-only")
+def test_parent_death_pipe_kills_managed_process_group(tmp_path):
+    lock = tmp_path / "manager.lock"
+    child_ready = tmp_path / "child-ready"
+    child_code = (
+        "import signal,time; from pathlib import Path; "
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+        f"Path({str(child_ready)!r}).write_text('ready'); time.sleep(60)"
+    )
+    owner_code = "\n".join([
+        "import os, sys, time",
+        "from pathlib import Path",
+        "from atalk.runtime_manager import _exclusive_lock, _launch_with_parent_watchdog",
+        f"with _exclusive_lock(Path({str(lock)!r})) as lock_descriptor:",
+        "    process = _launch_with_parent_watchdog(",
+        f"        [sys.executable, '-c', {child_code!r}],",
+        "        cwd=None, environment=os.environ.copy(), shutdown_timeout_seconds=1.0,",
+        "        lock_descriptor=lock_descriptor,",
+        "    )",
+        f"    ready = Path({str(child_ready)!r})",
+        "    while not ready.exists(): time.sleep(0.01)",
+        "    print(process.pid, flush=True)",
+        "    time.sleep(60)",
+    ])
+    owner = subprocess.Popen(
+        [sys.executable, "-c", owner_code],
+        cwd=tmp_path,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    assert owner.stdout is not None
+    line = owner.stdout.readline().strip()
+    if not line:
+        stderr = owner.stderr.read() if owner.stderr else ""
+        pytest.fail(f"watchdog owner failed to launch: {stderr}")
+    child_pid = int(line)
+    assert _pid_exists(child_pid)
+
+    os.kill(owner.pid, signal.SIGKILL)
+    owner.wait(timeout=2)
+    with pytest.raises(RuntimeManagerError, match="already owns"):
+        with _exclusive_lock(lock):
+            pass
+    deadline = time.monotonic() + 5
+    while _pid_exists(child_pid) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert not _pid_exists(child_pid)
+    lock_deadline = time.monotonic() + 2
+    while True:
+        try:
+            with _exclusive_lock(lock):
+                break
+        except RuntimeManagerError:
+            if time.monotonic() >= lock_deadline:
+                raise
+            time.sleep(0.01)
+
+
+def test_stale_live_pid_is_never_signaled_or_duplicated(tmp_path):
+    manager = make_manager(tmp_path)
+    manager._prepare_private_directories()
+    manager.paths.state.write_text(json.dumps({
+        "version": 1,
+        "status": "RUNNING",
+        "release": "0.1.0a11",
+        "pid": os.getpid(),
+    }))
+    os.chmod(manager.paths.state, 0o600)
+    with pytest.raises(RuntimeManagerError, match="possibly reused PID"):
+        manager._recover_stale_runtime()
+
+
 def test_stage_downloads_exact_allowlisted_pins_and_verifies_pypi_hashes(tmp_path, monkeypatch):
-    wheel_bytes = b"verified wheel fixture"
-    digest = hashlib.sha256(wheel_bytes).hexdigest()
     wheel_names = {
         "atalk-sdk": "atalk_sdk-0.1.0a11-py3-none-any.whl",
         "atalk-hermes": "atalk_hermes-0.1.0a11-py3-none-any.whl",
     }
+    wheel_bytes = {package: wheel_fixture(package) for package in wheel_names}
+    digests = {package: hashlib.sha256(value).hexdigest() for package, value in wheel_bytes.items()}
     commands = []
 
     def fake_venv_create(_builder, path):
@@ -125,22 +266,27 @@ def test_stage_downloads_exact_allowlisted_pins_and_verifies_pypi_hashes(tmp_pat
         commands.append(command)
         if "download" in command:
             destination = Path(command[command.index("--dest") + 1])
-            for filename in wheel_names.values():
-                (destination / filename).write_bytes(wheel_bytes)
+            for package, filename in wheel_names.items():
+                (destination / filename).write_bytes(wheel_bytes[package])
         return type("Completed", (), {"returncode": 0, "stdout": "", "stderr": ""})()
 
     def hashes(package, _version):
         normalized = package.replace("_", "-")
         filename = wheel_names[normalized]
-        return {filename: digest}
+        return {filename: digests[normalized]}
 
     manager = make_manager(tmp_path, command_runner=runner, artifact_hash_fetcher=hashes)
     manager._prepare_private_directories()
+    stale = manager.paths.releases / "0.1.0a11"
+    stale.mkdir()
+    (stale / "attacker-controlled").write_text("must not be reused")
     manager.verify = lambda _release: None
     monkeypatch.setattr("atalk.runtime_manager.venv.EnvBuilder.create", fake_venv_create)
+    monkeypatch.setattr("atalk.runtime_manager._verify_installed_distributions", lambda *_args: None)
     release = manager.stage("0.1.0a11")
 
     assert release.version == "0.1.0a11"
+    assert not (release.path / "attacker-controlled").exists()
     assert commands[0][-2:] == ["atalk-sdk==0.1.0a11", "atalk-hermes==0.1.0a11"]
     assert "download" in commands[0]
     assert "--index-url" in commands[0]
@@ -149,7 +295,11 @@ def test_stage_downloads_exact_allowlisted_pins_and_verifies_pypi_hashes(tmp_pat
     assert "--no-index" in commands[1]
     marker = json.loads((release.path / "release.json").read_text())
     assert marker["packages"] == ["atalk-sdk==0.1.0a11", "atalk-hermes==0.1.0a11"]
-    assert marker["artifacts"] == {name: digest for name in sorted(wheel_names.values())}
+    assert marker["artifacts"] == {
+        wheel_names[package]: digests[package] for package in sorted(wheel_names)
+    }
+    assert marker["resolved"] == {"atalk-hermes": "0.1.0a11", "atalk-sdk": "0.1.0a11"}
+    assert len(marker["treeSha256"]) == 64
 
 
 def test_tampered_download_hash_is_rejected(tmp_path):
@@ -161,9 +311,37 @@ def test_tampered_download_hash_is_rejected(tmp_path):
     )
     wheelhouse = tmp_path / "wheels"
     wheelhouse.mkdir()
-    (wheelhouse / "atalk_sdk-0.1.0a11-py3-none-any.whl").write_bytes(b"tampered")
+    (wheelhouse / "atalk_sdk-0.1.0a11-py3-none-any.whl").write_bytes(wheel_fixture("atalk-sdk"))
     with pytest.raises(RuntimeManagerError, match="SHA-256"):
         manager._verify_downloaded_wheels(wheelhouse)
+
+
+def test_release_verification_uses_trusted_manifest_without_executing_candidate(tmp_path):
+    manager = make_manager(tmp_path, stack="python")
+    manager._prepare_private_directories()
+    release = write_release_fixture(manager)
+
+    manager.verify(release)
+    (release.site_packages / "atalk.py").write_text("VALUE = 'tampered'\n")
+    with pytest.raises(RuntimeManagerError, match="trusted manifest"):
+        manager.verify(release)
+
+
+def test_launch_revalidates_release_before_process_creation(tmp_path):
+    created = []
+    manager = make_manager(
+        tmp_path,
+        stack="python",
+        process_factory=lambda *_args, **_kwargs: created.append(True) or FakeProcess(),
+    )
+    manager._prepare_private_directories()
+    write_credentials(manager)
+    release = write_release_fixture(manager)
+    (release.site_packages / "atalk.py").write_text("VALUE = 'changed-after-stage'\n")
+
+    with pytest.raises(RuntimeManagerError, match="trusted manifest"):
+        manager.launch(release)
+    assert created == []
 
 
 def test_official_wheels_require_exact_trusted_publisher_provenance():
@@ -236,12 +414,15 @@ def test_only_fresh_status_from_the_current_managed_launch_is_actionable(tmp_pat
     process = FakeProcess()
     launch_id = str(uuid.uuid4())
     manager._process_launch_ids[process.pid] = launch_id
+    manager._process_versions[process.pid] = "0.1.0a11"
+    manager._process_peer_ids[process.pid] = "peer-1"
+    manager._process_started_at[process.pid] = now
     metadata = resolve_runtime_check_in(RuntimeOptions(
         integration=RuntimeComponent("atalk-hermes", "0.1.0a11"),
         capabilities=["runtime.auto-update"],
     )).to_wire()
     current = update_status(checked_at="2026-09-04T12:00:00.000Z")
-    status = UpdateStatus(metadata, current, process.pid, launch_id)
+    status = UpdateStatus(metadata, current, process.pid, launch_id, "peer-1")
 
     assert manager._status_is_actionable(status, process, "0.1.0a11") is True
     assert manager._status_is_actionable(
@@ -256,6 +437,37 @@ def test_only_fresh_status_from_the_current_managed_launch_is_actionable(tmp_pat
     ) is False
     assert manager._status_is_actionable(replace(status, writer_launch_id=str(uuid.uuid4())), process, "0.1.0a11") is False
     assert manager._status_is_actionable(replace(status, writer_process_id=process.pid + 1), process, "0.1.0a11") is False
+    assert manager._status_is_actionable(replace(status, writer_peer_id="another-peer"), process, "0.1.0a11") is False
+    process.alive = False
+    process.returncode = 1
+    assert manager._status_is_actionable(status, process, "0.1.0a11") is False
+
+
+def test_python_health_uses_sdk_release_even_when_custom_integration_has_its_own_version(tmp_path):
+    now = datetime.fromisoformat("2026-09-04T12:00:00+00:00").timestamp()
+    manager = make_manager(tmp_path, stack="python", clock=lambda: now)
+    process = FakeProcess()
+    launch_id = str(uuid.uuid4())
+    manager._process_launch_ids[process.pid] = launch_id
+    manager._process_versions[process.pid] = "0.1.0a11"
+    manager._process_peer_ids[process.pid] = "peer-1"
+    manager._process_started_at[process.pid] = now
+    metadata = resolve_runtime_check_in(RuntimeOptions(
+        integration=RuntimeComponent("custom", "7.4.2"),
+        capabilities=["runtime.auto-update"],
+    )).to_wire()
+    # When the SDK is current, the server may report the unknown custom
+    # integration as the determining advisory. That still proves health, but
+    # it must not be mistaken for an SDK update decision.
+    status = UpdateStatus(
+        metadata,
+        replace(update_status(), current_version="7.4.2", status="UNKNOWN", recommended_version=None),
+        process.pid,
+        launch_id,
+        "peer-1",
+    )
+    assert manager._status_is_from_current_launch(status, process, "0.1.0a11") is True
+    assert manager._status_is_actionable(status, process, "0.1.0a11") is False
 
 
 def test_status_without_manager_capability_or_with_unsafe_permissions_is_ignored(tmp_path):
@@ -350,11 +562,134 @@ def test_failed_candidate_restarts_previous_runtime_after_atomic_rollback(tmp_pa
     assert restarted_manager.update_deferment("0.1.0a12") is None
 
 
+def test_unhealthy_rollback_is_stopped_and_reported_as_failure(tmp_path):
+    manager = make_manager(tmp_path, clock=lambda: 1_800_000_000.0)
+    manager._prepare_private_directories()
+    old = ManagedRelease("0.1.0a11", tmp_path / "old", tmp_path / "old" / "site")
+    candidate = ManagedRelease("0.1.0a12", tmp_path / "candidate", tmp_path / "candidate" / "site")
+    original = FakeProcess()
+    launched = []
+    stopped = []
+    manager.stage = lambda _version: candidate
+
+    def launch(_release):
+        process = FakeProcess()
+        launched.append(process)
+        return process
+
+    def stop(process):
+        stopped.append(process.pid)
+        process.alive = False
+        process.returncode = 1
+
+    manager.launch = launch
+    manager.stop_process = stop
+    manager.health_check = lambda _process: False
+    with pytest.raises(RuntimeManagerError, match="remained unhealthy"):
+        manager.reconcile(original, old, "0.1.0a12")
+    assert launched[-1].pid in stopped
+    assert manager.update_deferment("0.1.0a12") is not None
+
+
+def test_runtime_restart_retries_with_backoff_until_health_recovers(tmp_path):
+    manager = make_manager(tmp_path)
+    manager._prepare_private_directories()
+    release = ManagedRelease("0.1.0a11", tmp_path / "old", tmp_path / "old" / "site")
+    processes = [FakeProcess(), FakeProcess()]
+    health = iter([False, True])
+    stopped = []
+    delays = []
+    manager.launch = lambda _release: processes.pop(0)
+    manager.health_check = lambda _process: next(health)
+    manager.stop_process = lambda process: stopped.append(process.pid)
+    manager._interruptible_sleep = delays.append
+
+    recovered = manager._restart_until_healthy(release, reason="test_failure")
+    assert recovered is not None
+    assert stopped
+    assert delays == [2]
+    state = json.loads(manager.paths.state.read_text())
+    assert state["status"] == "RUNNING"
+    assert state["detail"] == "recovered_after=1; reason=test_failure"
+
+
+def test_monitored_rollback_quarantines_before_restore_launch(tmp_path):
+    manager = make_manager(tmp_path, clock=lambda: 1_800_000_000.0)
+    manager._prepare_private_directories()
+    candidate = ManagedRelease("0.1.0a12", tmp_path / "candidate", tmp_path / "candidate" / "site")
+    previous = ManagedRelease("0.1.0a11", tmp_path / "old", tmp_path / "old" / "site")
+    process = FakeProcess()
+    observed = []
+    record = manager._record_update_failure
+
+    def record_before_launch(*args):
+        observed.append("quarantine")
+        return record(*args)
+
+    manager.stop_process = lambda _process: observed.append("stop")
+    manager._record_update_failure = record_before_launch
+    manager.launch = lambda _release: observed.append("launch") or (_ for _ in ()).throw(
+        RuntimeManagerError("restore unavailable")
+    )
+    with pytest.raises(RuntimeManagerError, match="restore unavailable"):
+        manager._rollback_monitored_candidate(process, candidate, previous)
+    assert observed == ["stop", "quarantine", "launch"]
+    assert manager.update_deferment(candidate.version) is not None
+
+
+def test_post_activation_exit_rolls_back_instead_of_relaunching_candidate(tmp_path, monkeypatch):
+    manager = make_manager(tmp_path, clock=lambda: 1_800_000_000.0)
+    write_credentials(manager)
+    previous = ManagedRelease("0.1.0a11", tmp_path / "old", tmp_path / "old" / "site")
+    candidate = ManagedRelease("0.1.0a12", tmp_path / "candidate", tmp_path / "candidate" / "site")
+    previous_process = FakeProcess()
+    candidate_process = FakeProcess()
+    restored_process = FakeProcess()
+    restart_calls = []
+    rollback_calls = []
+
+    manager._load_current_release = lambda: previous
+    manager._restart_until_healthy = lambda release, **kwargs: (
+        restart_calls.append((release, kwargs["reason"])) or previous_process
+    )
+    manager.health_snapshot = lambda _process: True
+    status = UpdateStatus({}, update_status(), previous_process.pid, str(uuid.uuid4()), "peer-1")
+    statuses = iter([status, None])
+    manager.read_update_status = lambda: next(statuses)
+    manager._status_is_actionable = lambda *_args: True
+    manager.should_auto_update = lambda *_args: True
+    manager.update_deferment = lambda *_args, **_kwargs: None
+    manager.reconcile = lambda *_args: ReconcileResult(
+        candidate_process, candidate, updated=True, rolled_back=False,
+    )
+
+    def rollback(process, release, fallback):
+        rollback_calls.append((process, release, fallback))
+        return restored_process, fallback
+
+    manager._rollback_monitored_candidate = rollback
+    manager.stop_process = lambda process: setattr(process, "alive", False)
+    sleeps = []
+
+    def sleep(_seconds):
+        sleeps.append(True)
+        if len(sleeps) == 1:
+            candidate_process.alive = False
+            candidate_process.returncode = 17
+        else:
+            manager._stopping = True
+
+    monkeypatch.setattr("atalk.runtime_manager.time.sleep", sleep)
+
+    assert manager.run() == 0
+    assert restart_calls == [(previous, "initial_start")]
+    assert rollback_calls == [(candidate_process, candidate, previous)]
+
+
 def test_run_skips_quarantined_candidate_without_interrupting_previous_runtime(tmp_path, monkeypatch):
     now = [1_800_000_000.0]
     manager = make_manager(tmp_path, clock=lambda: now[0])
-    manager.paths.credential.write_text("{}")
-    os.chmod(manager.paths.credential, 0o600)
+    write_credentials(manager)
     write_status(manager)
     manager._record_update_failure(
         "0.1.0a12", "CANDIDATE", "candidate_health_or_switch_failed",
@@ -365,13 +700,18 @@ def test_run_skips_quarantined_candidate_without_interrupting_previous_runtime(t
     value = json.loads(manager.paths.update_status.read_text())
     value["writerProcessId"] = process.pid
     value["writerLaunchId"] = launch_id
+    value["writerPeerId"] = "peer-1"
     value["advisory"]["checkedAt"] = "2027-01-15T08:00:00.000Z"
     manager.paths.update_status.write_text(json.dumps(value))
     os.chmod(manager.paths.update_status, 0o600)
     manager._process_launch_ids[process.pid] = launch_id
+    manager._process_versions[process.pid] = "0.1.0a11"
+    manager._process_peer_ids[process.pid] = "peer-1"
+    manager._process_started_at[process.pid] = now[0]
     manager._load_current_release = lambda: current
     manager.launch = lambda _release: process
     manager.health_check = lambda _process: True
+    manager.health_snapshot = lambda _process: True
     reconciles = []
     manager.reconcile = lambda *_args: reconciles.append(_args)
     stops = []
@@ -496,10 +836,10 @@ def test_launch_requires_prior_pairing_and_never_inherits_activation_token(tmp_p
 
     manager = make_manager(tmp_path, process_factory=factory)
     release = ManagedRelease("0.1.0a11", tmp_path / "release", tmp_path / "release" / "site")
+    manager.verify = lambda _release: None
     with pytest.raises(RuntimeManagerError, match="Pair this agent once"):
         manager.launch(release)
-    manager.paths.credential.write_text("{}")
-    os.chmod(manager.paths.credential, 0o600)
+    write_credentials(manager)
     monkeypatch.setenv("ATALK_AGENT_TOKEN", "one-time-secret")
     monkeypatch.setenv("ATALK_ACTIVATION_TOKEN", "other-secret")
     manager.launch(release)
@@ -509,6 +849,7 @@ def test_launch_requires_prior_pairing_and_never_inherits_activation_token(tmp_p
     launch_id = captured["environment"]["ATALK_RUNTIME_LAUNCH_ID"]
     assert str(uuid.UUID(launch_id)) == launch_id
     assert manager._process_launch_ids[FakeProcess.next_pid - 1] == launch_id
+    assert manager._process_peer_ids[FakeProcess.next_pid - 1] == "peer-1"
 
 
 def test_health_endpoint_requires_2xx_and_connected_state():
@@ -520,43 +861,51 @@ def test_health_endpoint_requires_2xx_and_connected_state():
         def read(self, _limit):
             return self.body
 
-    assert _health_response_is_ready(Response(204)) is True
-    assert _health_response_is_ready(Response(404)) is False
-    assert _health_response_is_ready(Response(200, b'{"connected":true}')) is True
-    assert _health_response_is_ready(Response(200, b'{"connected":false}')) is False
-    assert _health_response_is_ready(Response(200, b'{"ok":false}')) is False
+    def ready(body, status=200, **overrides):
+        return _health_response_is_ready(
+            Response(status, json.dumps(body).encode()),
+            expected_process_id=123,
+            expected_version="0.1.0a11",
+            expected_peer_id="peer-1",
+            stack="hermes",
+            **overrides,
+        )
+
+    body = {
+        "status": "ok",
+        "connected": True,
+        "identity": {"id": "peer-1"},
+        "runtime": {
+            "processId": 123,
+            "metadata": {
+                "sdk": {"name": "atalk-sdk", "version": "0.1.0a11"},
+                "integration": {"name": "atalk-hermes", "version": "0.1.0a11"},
+            },
+        },
+    }
+    assert ready(body) is True
+    assert ready(body, status=404) is False
+    assert ready({**body, "connected": False}) is False
+    assert ready({**body, "identity": {"id": "other-peer"}}) is False
+    assert ready({**body, "runtime": {**body["runtime"], "processId": 999}}) is False
+    wrong_version = json.loads(json.dumps(body))
+    wrong_version["runtime"]["metadata"]["integration"]["version"] = "0.1.0a10"
+    assert ready(wrong_version) is False
 
 
 def test_health_endpoint_must_survive_startup_probation(tmp_path, monkeypatch):
-    class Response:
-        status = 200
-
-        def read(self, _limit):
-            return b'{"connected":true}'
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args):
-            return False
-
-    moments = [0.0, 0.0, 0.0, 0.0, 0.06, 0.06, 0.06]
-    requests = []
+    moments = [0.0, 0.0, 0.0, 0.01, 0.01, 0.06, 0.06]
     monkeypatch.setattr(
         "atalk.runtime_manager.time.monotonic",
         lambda: moments.pop(0) if moments else 0.06,
     )
     monkeypatch.setattr("atalk.runtime_manager.time.sleep", lambda _seconds: None)
-    monkeypatch.setattr(
-        "atalk.runtime_manager.urlopen",
-        lambda request, **_kwargs: requests.append(request) or Response(),
-    )
     manager = make_manager(
         tmp_path,
-        health_url="http://127.0.0.1:8080/health",
         health_grace_seconds=0.05,
         health_timeout_seconds=0.1,
     )
-
+    observations = []
+    manager.health_snapshot = lambda process, **_kwargs: observations.append(process.pid) or True
     assert manager.health_check(FakeProcess()) is True
-    assert len(requests) == 2
+    assert len(observations) == 3

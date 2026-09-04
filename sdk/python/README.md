@@ -117,20 +117,40 @@ portable on Windows, where process replacement stays a manual operator action fo
 The manager creates private versioned virtual environments, downloads only wheels from the canonical
 PyPI index, verifies every downloaded wheel against its PyPI SHA-256 digest, and additionally requires
 the aTalk wheels to carry PyPI-verified Trusted Publisher provenance for the official public repository
-and release workflow. It installs offline from that verified wheelhouse, checks exact coordinated
-package versions, and restarts the locally supplied command. It never evaluates a command or package
-name from the server. Credentials and runtime state remain outside every versioned environment, and
-the child never inherits `ATALK_AGENT_TOKEN`.
+and release workflow. Every candidate is staged afresh; an existing directory for the recommended
+version is displaced rather than reused. The manager installs offline from that verified wheelhouse,
+records the exact resolved graph and a digest of the installed environment, inspects distribution
+metadata without running candidate code, and revalidates the digest immediately before every launch.
+It never evaluates a command or package name from the server. Credentials and runtime state remain
+outside every versioned environment, and the child never inherits `ATALK_AGENT_TOKEN`.
 
-Only a sidecar written by the currently supervised process and per-launch identifier is actionable.
+Only an authenticated sidecar written by the currently supervised peer, process and per-launch
+identifier is actionable. Its SDK version—and, for Hermes, its managed integration version—must
+match the selected release.
 Advisories older than 12 hours (or dated more than five minutes in the future) are diagnostic only.
 
 The owner's policy in aTalk controls automation: **Notify** only reports, **Security** permits only a
 security update, and **Compatible** permits updates inside the current compatible line. The manager's
 local `--update-ceiling` defaults to `COMPATIBLE`, letting that owner choice govern, but an operator can
 restrict it to `SECURITY` or `NOTIFY`. A candidate must pass the configured HTTP 2xx health probe (or
-the process-stability grace period) and remain alive for the startup probation; otherwise the manager
-atomically restores the previous pointer and actually restarts the last-known-good runtime.
+the SDK's authenticated check-in sidecar when no HTTP probe is configured) for at least three
+observations and the complete startup probation. An HTTP response is accepted only when it reports
+`status: "ok"`, `connected: true`, and the expected peer identity, PID, SDK and integration version.
+Health remains monitored after activation; an early regression rolls back, and later sustained failures
+restart the selected release.
+
+The manager launches a small POSIX watchdog and keeps it alive through a private pipe. If the manager is
+killed or loses the pipe, the watchdog terminates the managed process group before releasing the profile
+lock, preventing a restarted manager from creating a second connector. The supplied command must stay in
+the foreground and must not daemonize into another process group. If legacy state names a possibly live
+PID without a watchdog-held lock, startup fails closed and asks the operator to stop it; the manager never
+signals a PID that may have been reused.
+
+The manager and child normally run as the same OS principal and therefore share one local trust domain:
+mode bits and digests protect against accidental corruption and other users, not a malicious child with
+the same UID. Isolating a locally compromised runtime requires running the supervisor as a separate
+service/UID with separately owned release and credential directories; that deployment is outside this
+bootstrap manager.
 
 ## Tasks and Workrooms
 
