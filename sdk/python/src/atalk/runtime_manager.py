@@ -394,7 +394,10 @@ class RuntimeManager:
                 try:
                     request = Request(self.health_url, method="GET", headers={"user-agent": "atalk-runtime-manager/1"})
                     with urlopen(request, timeout=min(2.0, max(0.2, deadline - time.monotonic()))) as response:
-                        if _health_response_is_ready(response):
+                        # A single fast 2xx is not enough: a candidate may bind
+                        # briefly and crash immediately afterwards. Reuse the
+                        # configured startup grace as a minimum probation period.
+                        if _health_response_is_ready(response) and elapsed >= self.health_grace_seconds:
                             return True
                 except OSError:
                     pass

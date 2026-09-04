@@ -111,6 +111,9 @@ atalk-runtime-manager run \
   -- python /opt/my-agent/agent.py
 ```
 
+The managed installer currently targets macOS and Linux. SDK messaging and version reporting remain
+portable on Windows, where process replacement stays a manual operator action for this release.
+
 The manager creates private versioned virtual environments, downloads only wheels from the canonical
 PyPI index, verifies every downloaded wheel against its PyPI SHA-256 digest, installs offline from
 that verified wheelhouse, checks exact coordinated package versions, and restarts the locally supplied
@@ -121,8 +124,8 @@ The owner's policy in aTalk controls automation: **Notify** only reports, **Secu
 security update, and **Compatible** permits updates inside the current compatible line. The manager's
 local `--update-ceiling` defaults to `COMPATIBLE`, letting that owner choice govern, but an operator can
 restrict it to `SECURITY` or `NOTIFY`. A candidate must pass the configured HTTP 2xx health probe (or
-the process-stability grace period); otherwise the manager atomically restores the previous pointer
-and actually restarts the last-known-good runtime.
+the process-stability grace period) and remain alive for the startup probation; otherwise the manager
+atomically restores the previous pointer and actually restarts the last-known-good runtime.
 
 ## Tasks and Workrooms
 

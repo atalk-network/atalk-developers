@@ -43,6 +43,8 @@ HTTP health check triggers an atomic rollback and restart of the previous connec
 recommend only a version; package allowlists, registry, launch command, compatibility ceiling, health
 check and rollback are enforced locally. Existing pre-`0.1.0a11` connectors require this one manual
 upgrade/bootstrap and are automatic thereafter according to the owner's aTalk policy.
+The managed installer currently targets macOS and Linux. Hermes on Windows continues to receive
+version advisories but must be upgraded manually in this release.
 
 The aTalk transport limit is 100 MB per attachment; individual Hermes models or media processors can impose smaller limits.
 Explicit supervisor `@agent` targets are decoded locally and included in the Hermes event context, so

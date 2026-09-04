@@ -450,3 +450,38 @@ def test_health_endpoint_requires_2xx_and_connected_state():
     assert _health_response_is_ready(Response(200, b'{"connected":true}')) is True
     assert _health_response_is_ready(Response(200, b'{"connected":false}')) is False
     assert _health_response_is_ready(Response(200, b'{"ok":false}')) is False
+
+
+def test_health_endpoint_must_survive_startup_probation(tmp_path, monkeypatch):
+    class Response:
+        status = 200
+
+        def read(self, _limit):
+            return b'{"connected":true}'
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    moments = [0.0, 0.0, 0.0, 0.0, 0.06, 0.06, 0.06]
+    requests = []
+    monkeypatch.setattr(
+        "atalk.runtime_manager.time.monotonic",
+        lambda: moments.pop(0) if moments else 0.06,
+    )
+    monkeypatch.setattr("atalk.runtime_manager.time.sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        "atalk.runtime_manager.urlopen",
+        lambda request, **_kwargs: requests.append(request) or Response(),
+    )
+    manager = make_manager(
+        tmp_path,
+        health_url="http://127.0.0.1:8080/health",
+        health_grace_seconds=0.05,
+        health_timeout_seconds=0.1,
+    )
+
+    assert manager.health_check(FakeProcess()) is True
+    assert len(requests) == 2
