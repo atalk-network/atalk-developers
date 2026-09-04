@@ -8,10 +8,8 @@ aTalk is currently a developer preview. Only the latest published alpha of each 
 
 | Package | Supported |
 | --- | --- |
-| Node `0.1.0-alpha.12` candidate | Best effort until published |
-| Python `0.1.0a9` candidate | Best effort until published |
-| Node `0.1.0-alpha.11` | Yes until the candidate is published |
-| Python `0.1.0a8` | Yes until the candidate is published |
+| Node coordinated packages `0.1.0-alpha.12` | Yes |
+| Python `atalk-sdk` / `atalk-hermes` `0.1.0a9` | Yes |
 | Older alphas | No |
 | Unreleased `main` | Best effort |
 
