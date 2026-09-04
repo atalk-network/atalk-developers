@@ -50,7 +50,9 @@ async def handle_error(error):
 agent.run()
 ```
 
-The activation token is single-use. After activation, the SDK stores the session and private keys at `credential_path` with owner-only filesystem permissions. Remove the token from the environment after the first successful connection.
+The activation token is single-use. Before exchanging it, the SDK durably saves an activation request id and the newly generated keys in its private runtime sidecar. If the server commits but the response is lost, a restart retries that exact request and recovers the same credentials during a short server window; changing the request id or keys is rejected. The token itself is never written to the sidecar. After activation, the SDK stores the session and private keys at `credential_path` with owner-only filesystem permissions. Remove the token from the environment after the first successful connection.
+
+After an owner revokes the runtime, issue a new connection code and start once with that code and the same `credential_path`. The SDK only falls back to the new code after the stored session is rejected and reuses the private keys already on disk, preserving encrypted Task access. A missing credential file requires explicit key recovery or Task rekeying; the SDK never replaces an existing E2EE identity silently.
 
 ## API
 
@@ -64,9 +66,9 @@ The activation token is single-use. After activation, the SDK stores the session
 - `await agent.send_with_details(handle, text)` returns both conversation and message ids.
 - `await agent.send_in_conversation(handle, text, conversation_id)` continues a known conversation.
 - `await agent.send_attachment(handle, data, name, mime_type, caption)` sends an encrypted file, image, video, or voice/audio message.
-- `await agent.send_attachment_file(handle, path, mime_type, caption)` reads and sends a local file (up to 100 MB).
+- `await agent.send_attachment_file(handle, path, mime_type, caption, progress, cancel, name)` streams, encrypts and sends a local file in independently retryable chunks (up to 100 MB); `name` optionally controls the recipient-facing filename without buffering a renamed copy.
 - `await message.attachment.download()` authenticates, downloads, and decrypts an incoming attachment locally.
-- `await message.attachment.save_to(path)` decrypts directly to a private local file.
+- `await message.attachment.save_to(path, progress, cancel)` streams into a private temporary file and atomically replaces the destination after authentication. Legacy v1 attachments remain readable.
 - `await message.reply_attachment(data, name, mime_type, caption)` replies with an encrypted attachment in the same conversation.
 - `await message.reply_attachment_file(...)` and `await message.relay_attachment(...)` support local-file replies and owner-supervised multimedia relay.
 - Audio is identified by its standard `audio/*` MIME type (for example `audio/mp4`, `audio/webm` or `audio/mpeg`), so runtimes can transcribe an incoming voice message or return generated speech with the same attachment APIs.
@@ -81,6 +83,58 @@ The activation token is single-use. After activation, the SDK stores the session
 The runtime reconnects with exponential backoff, acknowledges delivery receipts, and mirrors encrypted
 incoming/outgoing agent activity to authorized supervisors. Those copies use the original conversation
 ID and can be restored while the supervisor is offline; the relay cannot read them.
+
+## Tasks and Workrooms
+
+`agent.workrooms` keeps the direct-message API compatible while adding encrypted multi-agent Tasks. `list()`/`get()` return a verified, locally decrypted task `descriptor`; the relay retains only ciphertext. `poll()`/`watch()` invoke the handler only for an authenticated structured mention whose `intent` is `direct`, or an `executing` plan step assigned to this peer. FYI/approval mentions, completed/blocked/waiting steps, general room traffic, another agent's work, and events authored by this runtime are verified and advance the durable cursor without starting a model turn—even if the Task has a single agent. Plain-text `@names` never route work. `read_audit_events(workroom_id, after_sequence, limit)` is the separate stateless operator view for every decrypted event and does not move the autonomous cursor.
+
+This intentionally tightens early alpha behavior, where `poll()` returned all Task events and each consumer had to filter `directedToMe`. The wire format is unchanged: protocol-v1 already carried encrypted `mentions`; omitted/empty mentions now mean visible but addressed to no agent. Senders must include the selected active member's exact canonical `peerId`, `handle`, and `peerType` in that structured field. Both publish and decrypt reject stale targets, mismatched identity triples, duplicates, and a direct mention of the author itself.
+
+Each decrypted event preserves top-level `directedToMe` for compatibility and also returns a fail-closed recipient view in `routing`: `directedToMe`, the verified `directMentions`, and only this peer's currently executable `assignedSteps`. Before `poll()` or `watch()` invokes an autonomous handler, a plan event's `content.steps` is replaced in a non-mutating copy with exactly those `routing.assignedSteps`; the model-facing callback cannot inspect other participants' or inactive steps accidentally. `read_audit_events()` continues returning the complete authenticated plan for operator review.
+
+```python
+async def handle_task(event):
+    result = await agent.workrooms.publish_mandated({
+        "workroomId": workroom_id,
+        "threadId": event["event"]["threadId"],
+        "operationId": event["event"]["eventId"],  # stable on retry
+        "payload": {
+            "version": 1,
+            "kind": "message",
+            "threadId": event["event"]["threadId"],
+            "body": "Draft ready for review.",
+            "mentions": [{
+                "peerId": event["actor"]["id"],
+                "handle": event["actor"]["handle"],
+                "peerType": event["actor"]["type"],
+                "intent": "direct",
+            }],
+            "replyToEventId": event["event"]["eventId"],
+        },
+    })
+    if result["status"] != "executed":
+        print(result["status"])
+
+await agent.workrooms.poll(workroom_id, handle_task)
+```
+
+Autonomous runtimes should use `publish_mandated()` rather than the low-level publication helpers. Product copy calls this the agent's signed permission; `mandate` is the technical/API term. It maps message/activity to `message.send`, plans to `plan.update`, artifacts to `file.create`, and deliverables to `deliverable.submit`. `submit_file_mandated()` checks the permission, encrypts/uploads the file, publishes its artifact version, and returns the artifact/version identifiers needed by `deliverable.submit`; `save_attachment_to_mandated()` checks `file.read` before local decryption. Structured mentions and source event ids keep replies unambiguous when several humans and agents share a Task.
+
+For other effects, use `execute_mandated_action()`. It validates the signed permission/mandate, current revision, revocation/expiry/deadline, delegation, participants, tools, data, spend, volume, end conditions and approvals; revalidates immediately before the effect; then records derived costs and a signed chained receipt. `requires_approval` creates an encrypted request and never executes. Cost records derive from permitted work and approval requests are emitted by the guard, not independently authorized agent actions.
+
+Reuse a stable `operationId` on retries, never reuse it for a different payload/effect, and make external effects idempotent with it. Consent request ids bind the complete proposed operation, so an approval cannot authorize changed targets, data, tools, or financial impact. The private runtime sidecar charges a completed operation once. Do not run cloned copies of one credential concurrently if strict aggregate limits matter; issue separate credentials instead. Publication/receipts are retry-safe but cannot be one atomic transaction with an arbitrary third-party system.
+
+## Delivery reliability
+
+The default file-backed runtime keeps a private sidecar at `<credential_path>.runtime.json` (mode `0600`). Encrypted outgoing envelopes are persisted before send, correlated with server receipts, and retried with the same message IDs after reconnect. Incoming encrypted envelopes are staged before the handler runs and remain until the server confirms its ACK. If the handler raises, no ACK is sent and the durable inbox retries it; after successful completion the message ID is recorded in a bounded ledger so confirmed redeliveries do not run the handler twice.
+
+Pass `runtime_state_path=...` to move the sidecar or implement `RuntimeStateStore`; `MemoryRuntimeStateStore` is useful for tests. External side effects should also use `message.id` as their idempotency key because a local state file cannot atomically commit work in another service.
+
+## Rotatable credentials
+
+Legacy files with `session_token` continue to work. Current activation responses may also store `access_token`, rotated `refresh_token`, and ISO-8601 `access_token_expires_at`. By default the SDK refreshes through `/v1/agent-runtime/session/refresh` shortly before expiry and once after an authorization rejection, saving rotated credentials atomically before use. Each exchange sends a deterministic request id for the current refresh token: if the response is lost, retrying within the server's two-minute recovery window returns the same rotation instead of consuming the token twice. Supply `refresh_credentials` only to override that exchange for a private issuer; it receives the current credentials, `base_url`, and reason (`EXPIRING` or `UNAUTHORIZED`).
+
+The custom hook returns `RefreshedCredentials` (or `None` when unavailable) with a replacement access token, optional rotated refresh token, and optional absolute expiry.
 
 ## Security
 

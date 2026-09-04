@@ -2,19 +2,18 @@
 
 ## Developer preview
 
-The public line is intentionally marked alpha:
+The public line is intentionally marked alpha. As of 2026-09-03, the coordinated release versions advertised by the product are:
 
-- npm release candidate: `0.1.0-alpha.10`, distributed under the `next` tag;
-- Python release candidate: `0.1.0a7`, installed with `pip --pre`;
-- previous Git release tags: `node-v0.1.0-alpha.9` and `python-v0.1.0a6`.
+- npm packages in the coordinated candidate: `0.1.0-alpha.11`, distributed under the `next` tag;
+- Python packages in the coordinated candidate: `0.1.0a8`, installed with `pip --pre`.
 
-Repository manifests may move one candidate ahead while a coordinated release is being validated. Public product metadata and installation docs must continue to name the registry versions until the new release is available.
+Repository manifests may move one candidate ahead while a coordinated release is being validated. Public documentation and product metadata must continue to name the registry versions until the new release is available.
 
 During `0.x`, minor releases may contain breaking API or protocol changes. Patch releases must remain compatible with their minor line unless they fix a security defect that cannot be addressed safely otherwise.
 
 ## Coordinated packages
 
-`@atalk/sdk`, `@atalk/protocol`, `@atalk/core-native`, `@atalk/gateway`, `@atalk/mcp-server`, `@atalk/agent-plugin`, `@atalk/openclaw` and every native platform package share one exact npm version. The Node release workflow publishes them as one release set and verifies the native artifact matrix before publication.
+`@atalk/sdk`, `@atalk/protocol`, `@atalk/core-native`, every native platform package, and the Node integrations (`@atalk/gateway`, OpenClaw, MCP, and the portable Agent Plugin) share one exact npm version. The Node release workflow publishes them as one release set and verifies the native artifact matrix before publication.
 
 The Python package uses the PEP 440 spelling of the same release. For example:
 
@@ -22,10 +21,8 @@ The Python package uses the PEP 440 spelling of the same release. For example:
 | --- | --- | --- |
 | First alpha | `0.1.0-alpha.1` | `0.1.0a1` |
 | Ownership alpha | `0.1.0-alpha.2` | `0.1.0a2` |
-| Supervision alpha | `0.1.0-alpha.3` | `0.1.0a3` |
-| Encrypted attachments alpha | `0.1.0-alpha.8` | `0.1.0a5` |
-| Universal Gateway and agent multimedia | `0.1.0-alpha.9` | `0.1.0a6` |
 | Directed supervision | `0.1.0-alpha.10` | `0.1.0a7` |
+| Encrypted Tasks, granular mandates and strict agent routing | `0.1.0-alpha.11` | `0.1.0a8` |
 | First beta | `0.1.0-beta.1` | `0.1.0b1` |
 | Stable | `0.1.0` | `0.1.0` |
 

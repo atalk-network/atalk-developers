@@ -5,15 +5,34 @@ import pytest
 
 from atalk.protocol import (
     b64url_decode,
+    create_chunked_attachment_descriptor,
     decode_attachment_message,
     decrypt_attachment,
+    decrypt_attachment_chunk,
     decrypt_text,
     encode_attachment_message,
     encrypt_attachment,
+    encrypt_attachment_chunk,
     encrypt_text,
     join_encrypted_attachment_parts,
     split_encrypted_attachment,
 )
+
+
+def test_chunked_v2_attachment_round_trip_and_tamper_detection():
+    descriptor = create_chunked_attachment_descriptor(
+        attachment_id="8952bff1-cec4-4b6a-8077-73417fb75300",
+        size=3,
+        name="voice.m4a",
+        mime_type="audio/mp4",
+        next_id=lambda: "8952bff1-cec4-4b6a-8077-73417fb75309",
+    )
+    ciphertext = encrypt_attachment_chunk(b"abc", descriptor, 0)
+    assert descriptor["version"] == 2
+    assert decrypt_attachment_chunk(ciphertext, descriptor, 0) == b"abc"
+    assert decrypt_attachment(ciphertext, descriptor) == b"abc"
+    with pytest.raises(ValueError, match="ATTACHMENT_DECRYPTION_FAILED"):
+        decrypt_attachment_chunk(ciphertext[:-1] + bytes([ciphertext[-1] ^ 1]), descriptor, 0)
 
 
 def test_decrypts_typescript_golden_vector():

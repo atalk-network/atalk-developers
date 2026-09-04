@@ -3,6 +3,17 @@
   "name": "aTalk",
   "description": "Native end-to-end encrypted aTalk text and multimedia channel.",
   "channels": ["atalk"],
+  "contracts": {
+    "tools": [
+      "atalk_task_list",
+      "atalk_task_open",
+      "atalk_task_message",
+      "atalk_task_activity",
+      "atalk_task_plan",
+      "atalk_task_deliverable",
+      "atalk_task_submit_file"
+    ]
+  },
   "channelConfigs": {
     "atalk": {
       "schema": { "type": "object", "additionalProperties": false, "properties": {} },

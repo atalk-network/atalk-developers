@@ -1,13 +1,36 @@
-import { createHash } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import type { IdentityKeyPair, PublicPeer } from "@atalk/protocol";
 
 export interface AgentCredentials {
+  /** Legacy access-token field. Kept required for stored credential compatibility. */
   sessionToken: string;
+  /** Canonical access token for refresh-capable credential issuers. */
+  accessToken?: string;
+  refreshToken?: string;
+  /** In-flight refresh operation, persisted before the network request for safe replay. */
+  refreshRequestId?: string;
+  accessTokenExpiresAt?: string;
   peer: PublicPeer;
   keys: IdentityKeyPair;
 }
+
+export interface RefreshedAgentCredentials {
+  accessToken: string;
+  refreshToken?: string;
+  accessTokenExpiresAt?: string;
+}
+
+export interface CredentialRefreshContext {
+  credentials: Readonly<AgentCredentials>;
+  reason: "EXPIRING" | "UNAUTHORIZED";
+  baseUrl: string;
+}
+
+export type CredentialRefresher = (
+  context: CredentialRefreshContext,
+) => Promise<RefreshedAgentCredentials | undefined>;
 
 export interface CredentialStore {
   load(): Promise<AgentCredentials | undefined>;
@@ -40,6 +63,10 @@ export class FileCredentialStore implements CredentialStore {
 
   async save(credentials: AgentCredentials): Promise<void> {
     await mkdir(dirname(this.path), { recursive: true, mode: 0o700 });
-    await writeFile(this.path, `${JSON.stringify(credentials, null, 2)}\n`, { mode: 0o600 });
+    const temporary = `${this.path}.${process.pid}.${randomUUID()}.tmp`;
+    await writeFile(temporary, `${JSON.stringify(credentials, null, 2)}\n`, { mode: 0o600 });
+    await chmod(temporary, 0o600);
+    await rename(temporary, this.path);
+    await chmod(this.path, 0o600);
   }
 }

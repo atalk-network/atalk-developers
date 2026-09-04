@@ -11,6 +11,7 @@ interface CliOptions {
   port: number;
   baseUrl: string;
   credentialPath: string;
+  inboxPath?: string;
   webhookUrl?: string;
 }
 
@@ -32,18 +33,20 @@ function parseOptions(args: string[]): CliOptions {
   const port = Number.parseInt(rawPort, 10);
   if (!Number.isInteger(port) || port < 1 || port > 65_535) throw new Error("Gateway port must be between 1 and 65535");
   const webhookUrl = valueAfter(args, "--webhook-url") ?? process.env.ATALK_WEBHOOK_URL;
+  const inboxPath = valueAfter(args, "--inbox-path") ?? process.env.ATALK_GATEWAY_INBOX_PATH;
   return {
     command,
     host: valueAfter(args, "--host") ?? process.env.ATALK_GATEWAY_HOST ?? "127.0.0.1",
     port,
     baseUrl: valueAfter(args, "--base-url") ?? process.env.ATALK_BASE_URL ?? "https://api.atalk.ar",
     credentialPath: resolve(valueAfter(args, "--credential-path") ?? process.env.ATALK_CREDENTIAL_PATH ?? join(homedir(), ".atalk", "gateway-agent.json")),
+    ...(inboxPath ? { inboxPath: resolve(inboxPath) } : {}),
     ...(webhookUrl ? { webhookUrl } : {}),
   };
 }
 
 function help(): void {
-  process.stdout.write(`aTalk Agent Gateway\n\nUsage:\n  atalk-gateway pair       Pair an aTalk agent once\n  atalk-gateway start      Start the local HTTP/webhook gateway\n  atalk-gateway doctor     Verify credentials and connectivity\n\nOptions:\n  --base-url URL           aTalk API (default: https://api.atalk.ar)\n  --credential-path PATH   Private agent credential file location\n  --host HOST              Listen host (default: 127.0.0.1)\n  --port PORT              Listen port (default: 8788)\n  --webhook-url URL        Deliver incoming events to a webhook\n\nEnvironment:\n  ATALK_AGENT_TOKEN        One-time activation token (pairing only)\n  ATALK_GATEWAY_API_KEY    Required when listening outside localhost\n  ATALK_WEBHOOK_SECRET     HMAC-SHA256 webhook signing secret\n  ATALK_GATEWAY_ALLOW_ORIGIN  Optional browser CORS origin\n`);
+  process.stdout.write(`aTalk Agent Gateway\n\nUsage:\n  atalk-gateway pair       Pair an aTalk agent once\n  atalk-gateway start      Start the local HTTP/webhook gateway\n  atalk-gateway doctor     Verify credentials and connectivity\n\nOptions:\n  --base-url URL           aTalk API (default: https://api.atalk.ar)\n  --credential-path PATH   Private agent credential file location\n  --inbox-path PATH        Durable inbox file (defaults next to credentials)\n  --host HOST              Listen host (default: 127.0.0.1)\n  --port PORT              Listen port (default: 8788)\n  --webhook-url URL        Deliver incoming events to a webhook\n\nEnvironment:\n  ATALK_AGENT_TOKEN        One-time activation token (pairing only)\n  ATALK_GATEWAY_API_KEY    Required when listening outside localhost\n  ATALK_GATEWAY_INBOX_PATH Optional durable inbox file location\n  ATALK_WEBHOOK_SECRET     HMAC-SHA256 webhook signing secret\n  ATALK_GATEWAY_ALLOW_ORIGIN  Optional browser CORS origin\n`);
 }
 
 async function readSecret(prompt: string): Promise<string> {
@@ -113,6 +116,7 @@ async function start(options: CliOptions): Promise<void> {
   const gateway = createAtalkGateway({
     baseUrl: options.baseUrl,
     credentialPath: options.credentialPath,
+    ...(options.inboxPath ? { inboxPath: options.inboxPath } : {}),
     host: options.host,
     port: options.port,
     ...(process.env.ATALK_AGENT_TOKEN ? { token: process.env.ATALK_AGENT_TOKEN } : {}),

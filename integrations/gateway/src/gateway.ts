@@ -1,9 +1,21 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
+import { createReadStream } from "node:fs";
+import { mkdtemp, open, rm } from "node:fs/promises";
 import { createServer, type IncomingMessage as HttpRequest, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { Agent, type IncomingMessage, type SentMessage } from "@atalk/sdk";
 import { GATEWAY_SPEC, MAX_ATTACHMENT_BYTES } from "./constants.js";
-import { GatewayInbox, serializeGatewayMessage, type GatewayMessageEvent } from "./inbox.js";
+import {
+  FileGatewayInboxStore,
+  GatewayInbox,
+  MemoryGatewayInboxStore,
+  serializeGatewayMessage,
+  type GatewayInboxRecord,
+  type GatewayInboxStore,
+  type GatewayMessageEvent,
+} from "./inbox.js";
 import { gatewayOpenApiDocument } from "./openapi.js";
 
 export { GATEWAY_SPEC, MAX_ATTACHMENT_BYTES } from "./constants.js";
@@ -26,6 +38,8 @@ export interface AtalkGatewayOptions {
   webhookSecret?: string;
   webhookRetries?: number;
   inboxCapacity?: number;
+  inboxPath?: string;
+  inboxStore?: GatewayInboxStore;
   agent?: Agent;
   logger?: GatewayLogger;
   fetch?: typeof fetch;
@@ -84,6 +98,16 @@ function sendError(response: ServerResponse, status: number, code: string, messa
   sendJson(response, status, { error: { code, message } });
 }
 
+function sendMandatedResult(response: ServerResponse, operationId: string, result: unknown): void {
+  const status = result && typeof result === "object" && "status" in result
+    ? (result as { status?: unknown }).status
+    : undefined;
+  sendJson(response, status === "executed" ? 201 : status === "requires_approval" ? 202 : 403, {
+    operationId,
+    result,
+  });
+}
+
 async function readBody(request: HttpRequest, maximum: number): Promise<Buffer> {
   const declared = Number.parseInt(request.headers["content-length"] ?? "", 10);
   if (Number.isFinite(declared) && declared > maximum) throw new HttpError(413, "PAYLOAD_TOO_LARGE", `Body cannot exceed ${maximum} bytes`);
@@ -96,6 +120,42 @@ async function readBody(request: HttpRequest, maximum: number): Promise<Buffer> 
     chunks.push(value);
   }
   return Buffer.concat(chunks);
+}
+
+async function stageRequestBody(request: HttpRequest, maximum: number): Promise<{
+  path: string;
+  size: number;
+  cleanup(): Promise<void>;
+}> {
+  const declared = Number.parseInt(request.headers["content-length"] ?? "", 10);
+  if (Number.isFinite(declared) && declared > maximum) throw new HttpError(413, "PAYLOAD_TOO_LARGE", `Body cannot exceed ${maximum} bytes`);
+  const directory = await mkdtemp(join(tmpdir(), "atalk-gateway-"));
+  const path = join(directory, "attachment.bin");
+  const file = await open(path, "wx", 0o600);
+  let size = 0;
+  try {
+    for await (const chunk of request) {
+      const value = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Uint8Array);
+      size += value.byteLength;
+      if (size > maximum) throw new HttpError(413, "PAYLOAD_TOO_LARGE", `Body cannot exceed ${maximum} bytes`);
+      await file.write(value);
+    }
+    await file.sync();
+    return { path, size, cleanup: () => rm(directory, { recursive: true, force: true }) };
+  } catch (error) {
+    await rm(directory, { recursive: true, force: true }).catch(() => undefined);
+    throw error;
+  } finally {
+    await file.close();
+  }
+}
+
+async function stageDownload(name: string): Promise<{ path: string; cleanup(): Promise<void> }> {
+  const directory = await mkdtemp(join(tmpdir(), "atalk-gateway-download-"));
+  return {
+    path: join(directory, safeFileName(name)),
+    cleanup: () => rm(directory, { recursive: true, force: true }),
+  };
 }
 
 async function readJson(request: HttpRequest): Promise<JsonBody> {
@@ -135,10 +195,14 @@ function safeFileName(value: string): string {
   return value.replace(/[\r\n"\\/]+/gu, "_").slice(0, 180) || "attachment";
 }
 
-function messageOrThrow(inbox: GatewayInbox, id: string): IncomingMessage {
-  const message = inbox.get(id);
-  if (!message) throw new HttpError(404, "MESSAGE_NOT_FOUND", "The message is unknown or has expired from the gateway cache");
-  return message;
+type MessageContext = { live: IncomingMessage; record?: never } | { live?: never; record: GatewayInboxRecord };
+
+function messageOrThrow(inbox: GatewayInbox, id: string): MessageContext {
+  const live = inbox.get(id);
+  if (live) return { live };
+  const record = inbox.getRecord(id);
+  if (record) return { record };
+  throw new HttpError(404, "MESSAGE_NOT_FOUND", "The message is unknown or has been acknowledged");
 }
 
 function replyText(message: IncomingMessage, text: string): Promise<string> {
@@ -148,6 +212,11 @@ function replyText(message: IncomingMessage, text: string): Promise<string> {
 function replyAttachment(message: IncomingMessage, data: Uint8Array, name: string, mimeType: string, caption?: string): Promise<string> {
   const input = { data, name, mimeType, ...(caption ? { caption } : {}) };
   return message.isSupervisor && !message.isMentioned ? message.relayAttachment(input) : message.replyAttachment(input);
+}
+
+function durableTarget(record: GatewayInboxRecord): string {
+  if (record.routing.targetHandle) return record.routing.targetHandle;
+  throw new HttpError(409, "ROUTING_CONTEXT_MISSING", "This persisted supervisor event has no known counterparty");
 }
 
 class HttpError extends Error {
@@ -192,9 +261,18 @@ class GatewayRuntime implements AtalkGatewayRuntime {
       baseUrl: options.baseUrl ?? "https://api.atalk.ar",
       ...(options.credentialPath ? { credentialPath: options.credentialPath } : {}),
     });
-    this.inbox = new GatewayInbox(options.inboxCapacity);
-    this.agent.on("message", (message) => {
-      this.inbox.push(message);
+    const inboxStore = options.inboxStore
+      ?? (options.inboxPath
+        ? new FileGatewayInboxStore(options.inboxPath)
+        : options.credentialPath
+          ? new FileGatewayInboxStore(`${options.credentialPath}.inbox.json`)
+          : options.agent
+            ? new MemoryGatewayInboxStore()
+            : new FileGatewayInboxStore(resolve(".atalk/gateway-inbox.json")));
+    const inboxCapacity = Math.max(1, positiveInteger(options.inboxCapacity ?? 500, 500, 100_000));
+    this.inbox = new GatewayInbox(inboxCapacity, inboxStore);
+    this.agent.on("message", async (message) => {
+      await this.inbox.push(message);
       if (this.webhookUrl) {
         void this.deliverWebhook(message).catch((error: unknown) => {
           this.logger.error(`[aTalk Gateway] Webhook failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -229,6 +307,7 @@ class GatewayRuntime implements AtalkGatewayRuntime {
 
   async start(): Promise<void> {
     if (this.started) return;
+    await this.inbox.initialize();
     await this.agent.start();
     try {
       await new Promise<void>((resolve, reject) => {
@@ -293,16 +372,24 @@ class GatewayRuntime implements AtalkGatewayRuntime {
     if (request.method === "GET" && (url.pathname === "/" || url.pathname === "/v1/capabilities" || url.pathname === "/.well-known/atalk-agent-gateway")) {
       sendJson(response, 200, {
         spec: GATEWAY_SPEC,
-        delivery: ["long-polling", ...(this.webhookUrl ? ["webhook"] : [])],
-        capabilities: ["text", "image", "video", "audio", "file", "read-receipts", "supervision", "directed-mentions"],
+        delivery: ["long-polling", "durable-explicit-ack", ...(this.webhookUrl ? ["webhook"] : [])],
+        capabilities: [
+          "text", "image", "video", "audio", "file", "read-receipts", "supervision", "directed-mentions",
+          "workrooms", "workroom-mentions", "workroom-plan-assignments", "mandate-guard",
+          "workroom-mandated-publication", "workroom-attachments",
+        ],
         limits: { attachmentBytes: MAX_ATTACHMENT_BYTES, textCharacters: 32_000 },
         endpoints: {
           health: "/health",
           capabilities: "/v1/capabilities",
           openapi: "/openapi.json",
           events: "/v1/events",
+          eventAck: "/v1/messages/{messageId}/ack",
           send: "/v1/send",
           sendAttachment: "/v1/send/attachment",
+          workrooms: "/v1/workrooms",
+          executeWorkroomEvent: "/v1/workrooms/{workroomId}/execute",
+          submitWorkroomFile: "/v1/workrooms/{workroomId}/attachments/submit",
         },
       });
       return;
@@ -310,8 +397,11 @@ class GatewayRuntime implements AtalkGatewayRuntime {
     if (request.method === "GET" && url.pathname === "/v1/events") {
       const limit = positiveInteger(Number.parseInt(url.searchParams.get("limit") ?? "10", 10), 10, 100) || 10;
       const waitSeconds = positiveInteger(Number.parseInt(url.searchParams.get("waitSeconds") ?? "0", 10), 0, 30);
-      const messages = await this.inbox.take(limit, waitSeconds);
-      sendJson(response, 200, { events: messages.map(serializeGatewayMessage), pendingEvents: this.inbox.pending });
+      const explicit = url.searchParams.get("mode") === "explicit";
+      const records = explicit
+        ? await this.inbox.peek(limit, waitSeconds)
+        : await this.inbox.take(limit, waitSeconds);
+      sendJson(response, 200, { events: records.map((record) => record.event), pendingEvents: this.inbox.pending });
       return;
     }
     if (request.method === "POST" && url.pathname === "/v1/send") {
@@ -328,58 +418,361 @@ class GatewayRuntime implements AtalkGatewayRuntime {
     if (request.method === "POST" && url.pathname === "/v1/send/attachment") {
       const to = url.searchParams.get("to")?.trim();
       if (!to || to.length > 100) throw new HttpError(400, "INVALID_REQUEST", "The to query parameter is required");
-      const data = await readBody(request, MAX_ATTACHMENT_BYTES);
-      if (data.byteLength === 0) throw new HttpError(400, "INVALID_REQUEST", "Attachment body cannot be empty");
+      const staged = await stageRequestBody(request, MAX_ATTACHMENT_BYTES);
+      if (staged.size === 0) {
+        await staged.cleanup();
+        throw new HttpError(400, "INVALID_REQUEST", "Attachment body cannot be empty");
+      }
       const name = safeFileName(url.searchParams.get("name") ?? headerString(request, "x-atalk-filename") ?? "attachment");
       const mimeType = request.headers["content-type"] ?? "application/octet-stream";
       const caption = url.searchParams.get("caption") ?? headerString(request, "x-atalk-caption");
       const conversationId = url.searchParams.get("conversationId") ?? undefined;
-      const input = { data: new Uint8Array(data), name, mimeType, ...(caption ? { caption } : {}) };
-      const sent: SentMessage = conversationId
-        ? { conversationId, messageId: await this.agent.sendAttachmentInConversation(to, input, conversationId) }
-        : await this.agent.sendAttachmentWithDetails(to, input);
-      sendJson(response, 201, sent);
+      const transfer = new AbortController();
+      const abortTransfer = () => transfer.abort();
+      request.once("aborted", abortTransfer);
+      response.once("close", abortTransfer);
+      try {
+        const input = { path: staged.path, name, mimeType, ...(caption ? { caption } : {}), transfer: { signal: transfer.signal } };
+        const sent: SentMessage = conversationId
+          ? { conversationId, messageId: await this.agent.sendAttachmentFileInConversation(to, input, conversationId) }
+          : await this.agent.sendAttachmentFileWithDetails(to, input);
+        sendJson(response, 201, sent);
+      } finally {
+        request.off("aborted", abortTransfer);
+        response.off("close", abortTransfer);
+        await staged.cleanup();
+      }
       return;
     }
 
-    const match = /^\/v1\/messages\/([^/]+)(\/attachment|\/reply|\/reply\/attachment|\/read)$/u.exec(url.pathname);
-    if (match) {
-      const id = decodeURIComponent(match[1]!);
-      const action = match[2]!;
-      const message = messageOrThrow(this.inbox, id);
-      if (request.method === "GET" && action === "/attachment") {
-        if (!message.attachment) throw new HttpError(404, "ATTACHMENT_NOT_FOUND", "The selected message has no attachment");
-        const descriptor = message.attachment.descriptor;
-        const bytes = Buffer.from(await message.attachment.download());
+    if (request.method === "GET" && url.pathname === "/v1/workrooms") {
+      const cursor = url.searchParams.get("cursor") ?? undefined;
+      const limit = positiveInteger(Number.parseInt(url.searchParams.get("limit") ?? "50", 10), 50, 200) || 50;
+      sendJson(response, 200, await this.agent.workrooms.list(cursor, limit));
+      return;
+    }
+
+    const workroomMatch = /^\/v1\/workrooms\/([^/]+)(|\/events|\/execute|\/mandates\/guard|\/attachments|\/attachments\/submit|\/attachments\/download|\/attachments\/read)$/u.exec(url.pathname);
+    if (workroomMatch) {
+      const workroomId = decodeURIComponent(workroomMatch[1]!);
+      const action = workroomMatch[2]!;
+      if (request.method === "GET" && action === "") {
+        sendJson(response, 200, await this.agent.workrooms.get(workroomId));
+        return;
+      }
+      if (request.method === "GET" && action === "/events") {
+        const scope = url.searchParams.get("scope") ?? "directed";
+        const limit = positiveInteger(Number.parseInt(url.searchParams.get("limit") ?? "100", 10), 100, 500) || 100;
+        if (scope === "audit") {
+          const afterSequence = positiveInteger(
+            Number.parseInt(url.searchParams.get("afterSequence") ?? "0", 10),
+            0,
+            Number.MAX_SAFE_INTEGER,
+          );
+          sendJson(response, 200, await this.agent.workrooms.readAuditEvents(workroomId, afterSequence, limit));
+          return;
+        }
+        if (scope !== "directed") {
+          throw new HttpError(400, "INVALID_REQUEST", "scope must be directed or audit");
+        }
+        const events: unknown[] = [];
+        const cursor = await this.agent.workrooms.poll(workroomId, (event) => {
+          // Defense in depth for injected/custom SDK clients: an agent-facing
+          // gateway never turns shared room chatter into a model event.
+          if (event.directedToMe) events.push(event);
+        }, { limit });
+        sendJson(response, 200, { events, cursor, scope: "directed" });
+        return;
+      }
+      if (request.method === "POST" && action === "/events") {
+        const body = await readJson(request);
+        const threadId = requiredString(body, "threadId", 100);
+        if (!body.payload || typeof body.payload !== "object" || Array.isArray(body.payload)) {
+          throw new HttpError(400, "INVALID_REQUEST", "payload must be a workroom event object");
+        }
+        const record = await this.agent.workrooms.publish(workroomId, threadId, body.payload as never, {
+          ...(typeof body.eventId === "string" ? { eventId: body.eventId } : {}),
+          ...(typeof body.idempotencyKey === "string" ? { idempotencyKey: body.idempotencyKey } : {}),
+          ...(body.projection && typeof body.projection === "object" && !Array.isArray(body.projection)
+            ? { projection: body.projection as never }
+            : {}),
+        });
+        sendJson(response, 201, record);
+        return;
+      }
+      if (request.method === "POST" && action === "/execute") {
+        const body = await readJson(request);
+        const threadId = requiredString(body, "threadId", 100);
+        const operationId = requiredString(body, "operationId", 100);
+        if (!body.payload || typeof body.payload !== "object" || Array.isArray(body.payload)) {
+          throw new HttpError(400, "INVALID_REQUEST", "payload must be a workroom event object");
+        }
+        const mandateId = optionalString(body, "mandateId", 100);
+        const rationale = optionalString(body, "rationale", 4_000);
+        const result = await this.agent.workrooms.publishMandated({
+          workroomId, threadId, operationId, payload: body.payload as never,
+          ...(mandateId ? { mandateId } : {}),
+          ...(rationale ? { rationale } : {}),
+        });
+        sendMandatedResult(response, operationId, result);
+        return;
+      }
+      if (request.method === "POST" && action === "/mandates/guard") {
+        const body = await readJson(request);
+        sendJson(response, 200, await this.agent.workrooms.guardMandateUse({ ...body, workroomId } as never));
+        return;
+      }
+      if (request.method === "POST" && action === "/attachments") {
+        const staged = await stageRequestBody(request, MAX_ATTACHMENT_BYTES);
+        if (staged.size === 0) {
+          await staged.cleanup();
+          throw new HttpError(400, "INVALID_REQUEST", "Attachment body cannot be empty");
+        }
+        const transfer = new AbortController();
+        const abortTransfer = () => transfer.abort();
+        request.once("aborted", abortTransfer);
+        response.once("close", abortTransfer);
+        try {
+          const descriptor = await this.agent.workrooms.uploadAttachmentFile({
+            workroomId,
+            path: staged.path,
+            name: safeFileName(url.searchParams.get("name") ?? headerString(request, "x-atalk-filename") ?? "attachment"),
+            mimeType: request.headers["content-type"] ?? "application/octet-stream",
+            transfer: { signal: transfer.signal },
+          });
+          sendJson(response, 201, { descriptor });
+        } finally {
+          request.off("aborted", abortTransfer);
+          response.off("close", abortTransfer);
+          await staged.cleanup();
+        }
+        return;
+      }
+      if (request.method === "POST" && action === "/attachments/submit") {
+        const threadId = url.searchParams.get("threadId")?.trim();
+        const operationId = url.searchParams.get("operationId")?.trim();
+        if (!threadId || threadId.length > 100) throw new HttpError(400, "INVALID_REQUEST", "The threadId query parameter is required");
+        if (!operationId || operationId.length > 100) throw new HttpError(400, "INVALID_REQUEST", "The operationId query parameter is required");
+        const staged = await stageRequestBody(request, MAX_ATTACHMENT_BYTES);
+        if (staged.size === 0) {
+          await staged.cleanup();
+          throw new HttpError(400, "INVALID_REQUEST", "Attachment body cannot be empty");
+        }
+        let mentions: unknown[] = [];
+        const encodedMentions = url.searchParams.get("mentions");
+        if (encodedMentions) {
+          try {
+            const parsed = JSON.parse(encodedMentions) as unknown;
+            if (!Array.isArray(parsed)) throw new Error("not an array");
+            mentions = parsed;
+          } catch {
+            await staged.cleanup();
+            throw new HttpError(400, "INVALID_REQUEST", "mentions must be a JSON array");
+          }
+        }
+        const transfer = new AbortController();
+        const abortTransfer = () => transfer.abort();
+        request.once("aborted", abortTransfer);
+        response.once("close", abortTransfer);
+        try {
+          const result = await this.agent.workrooms.submitFileMandated({
+            workroomId, threadId, operationId, path: staged.path,
+            name: safeFileName(url.searchParams.get("name") ?? headerString(request, "x-atalk-filename") ?? "attachment"),
+            mimeType: request.headers["content-type"] ?? "application/octet-stream",
+            mentions: mentions as never,
+            ...(url.searchParams.get("mandateId") ? { mandateId: url.searchParams.get("mandateId")! } : {}),
+            ...(url.searchParams.get("title") ? { title: url.searchParams.get("title")! } : {}),
+            ...(url.searchParams.get("description") ? { description: url.searchParams.get("description")! } : {}),
+            ...(url.searchParams.get("artifactType") ? { artifactType: url.searchParams.get("artifactType")! } : {}),
+            ...(url.searchParams.get("artifactId") ? { artifactId: url.searchParams.get("artifactId")! } : {}),
+            ...(url.searchParams.get("artifactVersion") ? { artifactVersion: Number.parseInt(url.searchParams.get("artifactVersion")!, 10) } : {}),
+            transfer: { signal: transfer.signal },
+          });
+          sendMandatedResult(response, operationId, result);
+        } finally {
+          request.off("aborted", abortTransfer);
+          response.off("close", abortTransfer);
+          await staged.cleanup();
+        }
+        return;
+      }
+      if (request.method === "POST" && action === "/attachments/download") {
+        const body = await readJson(request);
+        if (!body.descriptor || typeof body.descriptor !== "object" || Array.isArray(body.descriptor)) {
+          throw new HttpError(400, "INVALID_REQUEST", "descriptor must be an encrypted attachment descriptor");
+        }
+        const descriptor = body.descriptor as { id?: unknown; name?: unknown; mimeType?: unknown; size?: unknown };
+        if (typeof descriptor.id !== "string" || typeof descriptor.name !== "string"
+          || typeof descriptor.mimeType !== "string" || typeof descriptor.size !== "number") {
+          throw new HttpError(400, "INVALID_REQUEST", "descriptor fields are invalid");
+        }
+        const staged = await stageDownload(descriptor.name);
+        const transfer = new AbortController();
+        const abortTransfer = () => transfer.abort();
+        request.once("aborted", abortTransfer);
+        response.once("close", abortTransfer);
+        try {
+          await this.agent.workrooms.downloadAttachmentTo(body.descriptor as never, staged.path, { signal: transfer.signal });
+        } catch (error) {
+          await staged.cleanup();
+          throw error;
+        } finally {
+          request.off("aborted", abortTransfer);
+          response.off("close", abortTransfer);
+        }
         response.writeHead(200, {
           "content-type": descriptor.mimeType,
-          "content-length": bytes.byteLength,
+          "content-length": descriptor.size,
           "content-disposition": `attachment; filename="${safeFileName(descriptor.name)}"`,
           "cache-control": "no-store",
         });
-        response.end(bytes);
+        const source = createReadStream(staged.path);
+        const cleanup = () => { void staged.cleanup(); };
+        source.once("error", (error) => { cleanup(); response.destroy(error); });
+        response.once("close", cleanup);
+        source.pipe(response);
+        return;
+      }
+      if (request.method === "POST" && action === "/attachments/read") {
+        const body = await readJson(request);
+        const threadId = requiredString(body, "threadId", 100);
+        const operationId = requiredString(body, "operationId", 100);
+        if (!body.descriptor || typeof body.descriptor !== "object" || Array.isArray(body.descriptor)) {
+          throw new HttpError(400, "INVALID_REQUEST", "descriptor must be an encrypted attachment descriptor");
+        }
+        const descriptor = body.descriptor as { id?: unknown; name?: unknown; mimeType?: unknown; size?: unknown };
+        if (typeof descriptor.id !== "string" || typeof descriptor.name !== "string"
+          || typeof descriptor.mimeType !== "string" || typeof descriptor.size !== "number") {
+          throw new HttpError(400, "INVALID_REQUEST", "descriptor fields are invalid");
+        }
+        const staged = await stageDownload(descriptor.name);
+        const transfer = new AbortController();
+        const abortTransfer = () => transfer.abort();
+        request.once("aborted", abortTransfer);
+        response.once("close", abortTransfer);
+        const mandateId = optionalString(body, "mandateId", 100);
+        const rationale = optionalString(body, "rationale", 4_000);
+        try {
+          const result = await this.agent.workrooms.downloadAttachmentToMandated({
+            workroomId, threadId, operationId, descriptor: body.descriptor as never, path: staged.path,
+            ...(mandateId ? { mandateId } : {}), ...(rationale ? { rationale } : {}),
+            transfer: { signal: transfer.signal },
+          });
+          if (result.status !== "executed") {
+            await staged.cleanup();
+            sendMandatedResult(response, operationId, result);
+            return;
+          }
+        } catch (error) {
+          await staged.cleanup();
+          throw error;
+        } finally {
+          request.off("aborted", abortTransfer);
+          response.off("close", abortTransfer);
+        }
+        response.writeHead(200, {
+          "content-type": descriptor.mimeType,
+          "content-length": descriptor.size,
+          "content-disposition": `attachment; filename="${safeFileName(descriptor.name)}"`,
+          "cache-control": "no-store",
+          "x-atalk-operation-id": operationId,
+        });
+        const source = createReadStream(staged.path);
+        const cleanup = () => { void staged.cleanup(); };
+        source.once("error", (error) => { cleanup(); response.destroy(error); });
+        response.once("close", cleanup);
+        source.pipe(response);
+        return;
+      }
+    }
+
+    const match = /^\/v1\/messages\/([^/]+)(\/attachment|\/reply|\/reply\/attachment|\/read|\/ack)$/u.exec(url.pathname);
+    if (match) {
+      const id = decodeURIComponent(match[1]!);
+      const action = match[2]!;
+      if (request.method === "POST" && action === "/ack") {
+        if (!await this.inbox.ack(id)) throw new HttpError(404, "MESSAGE_NOT_FOUND", "The event is not pending");
+        sendJson(response, 200, { messageId: id, acknowledged: true });
+        return;
+      }
+      const message = messageOrThrow(this.inbox, id);
+      if (request.method === "GET" && action === "/attachment") {
+        const descriptor = message.live?.attachment?.descriptor ?? message.record?.attachmentDescriptor;
+        if (!descriptor) throw new HttpError(404, "ATTACHMENT_NOT_FOUND", "The selected message has no attachment");
+        const staged = await stageDownload(descriptor.name);
+        const transfer = new AbortController();
+        const abortTransfer = () => transfer.abort();
+        request.once("aborted", abortTransfer);
+        response.once("close", abortTransfer);
+        try {
+          await (message.live?.attachment
+            ? message.live.attachment.downloadTo(staged.path, { signal: transfer.signal })
+            : this.agent.downloadAttachmentTo(descriptor, staged.path, { signal: transfer.signal }));
+        } catch (error) {
+          await staged.cleanup();
+          throw error;
+        } finally {
+          request.off("aborted", abortTransfer);
+          response.off("close", abortTransfer);
+        }
+        response.writeHead(200, {
+          "content-type": descriptor.mimeType,
+          "content-length": descriptor.size,
+          "content-disposition": `attachment; filename="${safeFileName(descriptor.name)}"`,
+          "cache-control": "no-store",
+        });
+        const source = createReadStream(staged.path);
+        const cleanup = () => { void staged.cleanup(); };
+        source.once("error", (error) => { cleanup(); response.destroy(error); });
+        response.once("close", cleanup);
+        source.pipe(response);
         return;
       }
       if (request.method === "POST" && action === "/read") {
-        await message.markRead();
+        if (message.live) await message.live.markRead();
+        else await this.agent.markMessageRead(id);
         sendJson(response, 200, { messageId: id, state: "READ" });
         return;
       }
       if (request.method === "POST" && action === "/reply") {
         const body = await readJson(request);
         const text = requiredString(body, "text", 32_000);
-        const messageId = await replyText(message, text);
-        sendJson(response, 201, { messageId, conversationId: message.conversationId });
+        const record = message.record;
+        const conversationId = message.live?.conversationId ?? record!.event.data.conversationId;
+        const messageId = message.live
+          ? await replyText(message.live, text)
+          : await this.agent.sendInConversation(durableTarget(record!), text, conversationId);
+        sendJson(response, 201, { messageId, conversationId });
         return;
       }
       if (request.method === "POST" && action === "/reply/attachment") {
-        const data = await readBody(request, MAX_ATTACHMENT_BYTES);
-        if (data.byteLength === 0) throw new HttpError(400, "INVALID_REQUEST", "Attachment body cannot be empty");
+        const staged = await stageRequestBody(request, MAX_ATTACHMENT_BYTES);
+        if (staged.size === 0) {
+          await staged.cleanup();
+          throw new HttpError(400, "INVALID_REQUEST", "Attachment body cannot be empty");
+        }
         const name = safeFileName(url.searchParams.get("name") ?? headerString(request, "x-atalk-filename") ?? "attachment");
         const mimeType = request.headers["content-type"] ?? "application/octet-stream";
         const caption = url.searchParams.get("caption") ?? headerString(request, "x-atalk-caption");
-        const messageId = await replyAttachment(message, new Uint8Array(data), name, mimeType, caption);
-        sendJson(response, 201, { messageId, conversationId: message.conversationId });
+        const record = message.record;
+        const conversationId = message.live?.conversationId ?? record!.event.data.conversationId;
+        const transfer = new AbortController();
+        const abortTransfer = () => transfer.abort();
+        request.once("aborted", abortTransfer);
+        response.once("close", abortTransfer);
+        try {
+          const input = { path: staged.path, name, mimeType, ...(caption ? { caption } : {}), transfer: { signal: transfer.signal } };
+          const messageId = message.live
+            ? await (message.live.isSupervisor && !message.live.isMentioned
+              ? message.live.relayAttachmentFile(input)
+              : message.live.replyAttachmentFile(input))
+            : await this.agent.sendAttachmentFileInConversation(durableTarget(record!), input, conversationId);
+          sendJson(response, 201, { messageId, conversationId });
+        } finally {
+          request.off("aborted", abortTransfer);
+          response.off("close", abortTransfer);
+          await staged.cleanup();
+        }
         return;
       }
     }

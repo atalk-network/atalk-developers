@@ -25,7 +25,9 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-          cache-dependency-path: sdk/python/pyproject.toml
+          cache-dependency-path: |
+            sdk/python/pyproject.toml
+            integrations/hermes/pyproject.toml
       - name: Verify release version
         run: node scripts/verify-release-versions.mjs python "$GITHUB_REF_NAME"
       - name: Require a public publishing repository
@@ -53,7 +55,7 @@ jobs:
           "$RUNNER_TEMP/atalk-wheel-smoke/bin/pip" install sdk/python/dist/*.whl
           "$RUNNER_TEMP/atalk-wheel-smoke/bin/python" - <<'PY'
           import inspect
-          from atalk import Agent, Message
+          from atalk import Agent, Message, WorkroomClient
 
           assert "supervision" in inspect.signature(Agent).parameters
           assert inspect.signature(Agent).parameters["token"].default is None
@@ -62,7 +64,11 @@ jobs:
           assert hasattr(Message, "mark_read")
           assert hasattr(Agent, "send_with_details")
           assert hasattr(Agent, "send_in_conversation")
-          print("Verified packaged Python integration API")
+          assert hasattr(WorkroomClient, "poll")
+          assert hasattr(WorkroomClient, "read_audit_events")
+          assert hasattr(WorkroomClient, "publish_mandated")
+          assert hasattr(WorkroomClient, "submit_file_mandated")
+          print("Verified packaged Python direct-message and Task APIs")
           PY
       - uses: actions/upload-artifact@v7
         with:

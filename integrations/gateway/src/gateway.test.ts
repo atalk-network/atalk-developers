@@ -1,7 +1,11 @@
 import type { IncomingMessage } from "@atalk/sdk";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { createAtalkGateway } from "./gateway.js";
+import { FileGatewayInboxStore, GatewayInbox, MemoryGatewayInboxStore } from "./inbox.js";
 
 type MessageHandler = (message: IncomingMessage) => void | Promise<void>;
 type ErrorHandler = (error: Error) => void;
@@ -22,6 +26,40 @@ class FakeAgent {
   messageHandler?: MessageHandler;
   errorHandler?: ErrorHandler;
   sent: Array<{ to: string; text?: string; conversationId?: string; bytes?: number }> = [];
+  workroomActions: Array<{ kind: string; input: Record<string, unknown> }> = [];
+  workrooms = {
+    list: async () => ({ workrooms: [{ workroom: { id: "00000000-0000-4000-8000-000000000010" } }], nextCursor: null }),
+    get: async (id: string) => ({ workroom: { id }, members: [], threads: [], latestMandates: [], approvals: [] }),
+    poll: async (_id: string, handler: (event: { directedToMe: boolean; marker: string }) => void) => {
+      handler({ directedToMe: false, marker: "general" });
+      handler({ directedToMe: true, marker: "targeted" });
+      return 7;
+    },
+    readAuditEvents: async () => ({
+      events: [
+        { directedToMe: false, marker: "general" },
+        { directedToMe: true, marker: "targeted" },
+      ],
+      nextAfterSequence: null,
+    }),
+    publish: async () => ({ event: { eventId: "00000000-0000-4000-8000-000000000011" } }),
+    publishMandated: async (input: Record<string, unknown>) => {
+      this.workroomActions.push({ kind: "publish", input });
+      return { status: "executed", value: { event: { eventId: "00000000-0000-4000-8000-000000000011" } } };
+    },
+    submitFileMandated: async (input: Record<string, unknown>) => {
+      this.workroomActions.push({ kind: "submit_file", input });
+      return { status: "executed", value: { descriptor: { id: "00000000-0000-4000-8000-000000000012" } } };
+    },
+    downloadAttachmentToMandated: async (input: Record<string, unknown>) => {
+      this.workroomActions.push({ kind: "read_file", input });
+      await writeFile(String(input.path), new Uint8Array([7]));
+      return { status: "executed", value: input.path };
+    },
+    guardMandateUse: async () => ({ status: "permitted" }),
+    uploadAttachmentFile: async () => ({ id: "00000000-0000-4000-8000-000000000012" }),
+    downloadAttachmentTo: async (_descriptor: unknown, path: string) => { await writeFile(path, new Uint8Array([9])); return path; },
+  };
 
   on(event: "message" | "error", handler: MessageHandler | ErrorHandler): this {
     if (event === "message") this.messageHandler = handler as MessageHandler;
@@ -47,6 +85,16 @@ class FakeAgent {
     this.sent.push({ to, bytes: input.data.byteLength, conversationId });
     return "continued-attachment";
   }
+  async sendAttachmentFileWithDetails(to: string, input: { path: string }) {
+    this.sent.push({ to, bytes: (await readFile(input.path)).byteLength });
+    return { conversationId: "attachment-conversation", messageId: "attachment-message" };
+  }
+  async sendAttachmentFileInConversation(to: string, input: { path: string }, conversationId: string) {
+    this.sent.push({ to, bytes: (await readFile(input.path)).byteLength, conversationId });
+    return "continued-attachment";
+  }
+  async markMessageRead() {}
+  async downloadAttachment() { return new Uint8Array(); }
 
   emitMessage(message: IncomingMessage): void {
     void this.messageHandler?.(message);
@@ -81,6 +129,7 @@ function incoming(overrides: Partial<IncomingMessage> = {}) {
     async relayAttachment() { return "relay-attachment"; },
     async relayAttachmentFile() { return "relay-file"; },
     async markRead() { calls.read += 1; },
+    routing: { mode: "REPLY", targetHandle: "@human.test" },
     ...overrides,
   };
   return { message, calls };
@@ -158,7 +207,7 @@ describe("aTalk Gateway", () => {
             nonce: "nonce",
           },
           async download() { return new Uint8Array([1, 2, 3]); },
-          async downloadTo(path) { return path; },
+          async downloadTo(path) { await writeFile(path, new Uint8Array([1, 2, 3])); return path; },
         },
       });
       fake.emitMessage(received.message);
@@ -218,6 +267,146 @@ describe("aTalk Gateway", () => {
       expect((await fetch(`${runtime.url}/v1/events`, { headers: { authorization: "Bearer secret" } })).status).toBe(200);
     } finally {
       await runtime.stop();
+    }
+  });
+
+  it("exposes only directed Workroom events by default and keeps an explicit audit view", async () => {
+    const runtime = createAtalkGateway({ host: "127.0.0.1", port: 0, agent: asAgent(new FakeAgent()) });
+    await runtime.start();
+    try {
+      const listed = await fetch(`${runtime.url}/v1/workrooms`).then((response) => response.json()) as {
+        workrooms: Array<{ workroom: { id: string } }>;
+      };
+      const id = listed.workrooms[0]!.workroom.id;
+      const received = await fetch(`${runtime.url}/v1/workrooms/${id}/events`).then((response) => response.json()) as {
+        events: Array<{ directedToMe: boolean; marker: string }>;
+        cursor: number;
+        scope: string;
+      };
+      expect(received).toEqual({
+        events: [{ directedToMe: true, marker: "targeted" }],
+        cursor: 7,
+        scope: "directed",
+      });
+
+      const audit = await fetch(`${runtime.url}/v1/workrooms/${id}/events?scope=audit&afterSequence=0`)
+        .then((response) => response.json()) as { events: Array<{ marker: string }> };
+      expect(audit.events.map(({ marker }) => marker)).toEqual(["general", "targeted"]);
+
+      expect((await fetch(`${runtime.url}/v1/workrooms/${id}/events?scope=everything`)).status).toBe(400);
+    } finally {
+      await runtime.stop();
+    }
+  });
+
+  it("executes Task publications and file I/O through the mandate boundary", async () => {
+    const fake = new FakeAgent();
+    const runtime = createAtalkGateway({ host: "127.0.0.1", port: 0, agent: asAgent(fake) });
+    await runtime.start();
+    const workroomId = "00000000-0000-4000-8000-000000000010";
+    const threadId = "00000000-0000-4000-8000-000000000020";
+    try {
+      const publication = await fetch(`${runtime.url}/v1/workrooms/${workroomId}/execute`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          threadId,
+          operationId: "00000000-0000-4000-8000-000000000030",
+          payload: { version: 1, kind: "message", threadId, body: "Done", mentions: [] },
+        }),
+      });
+      expect(publication.status).toBe(201);
+
+      const submitted = await fetch(
+        `${runtime.url}/v1/workrooms/${workroomId}/attachments/submit?threadId=${threadId}&operationId=00000000-0000-4000-8000-000000000031&name=result.txt`,
+        { method: "POST", headers: { "content-type": "text/plain" }, body: "result" },
+      );
+      expect(submitted.status).toBe(201);
+
+      const read = await fetch(`${runtime.url}/v1/workrooms/${workroomId}/attachments/read`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          threadId,
+          operationId: "00000000-0000-4000-8000-000000000032",
+          descriptor: {
+            version: 1,
+            id: "00000000-0000-4000-8000-000000000040",
+            kind: "FILE",
+            name: "result.txt",
+            mimeType: "text/plain",
+            size: 1,
+            ciphertextSize: 17,
+            key: "key",
+            nonce: "nonce",
+          },
+        }),
+      });
+      expect(read.status).toBe(200);
+      expect(new Uint8Array(await read.arrayBuffer())).toEqual(new Uint8Array([7]));
+      expect(fake.workroomActions.map(({ kind }) => kind).sort()).toEqual(["publish", "read_file", "submit_file"]);
+    } finally {
+      await runtime.stop();
+    }
+  });
+
+  it("keeps explicit-poll events durable until the consumer acknowledges them", async () => {
+    const inboxStore = new MemoryGatewayInboxStore();
+    const firstAgent = new FakeAgent();
+    const first = createAtalkGateway({
+      host: "127.0.0.1", port: 0, agent: asAgent(firstAgent), inboxStore,
+    });
+    await first.start();
+    const received = incoming();
+    firstAgent.emitMessage(received.message);
+    await expect.poll(() => first.inbox.pending).toBe(1);
+    const firstPoll = await fetch(`${first.url}/v1/events?mode=explicit`).then((response) => response.json()) as {
+      events: Array<{ id: string; actions: { ack: string } }>;
+      pendingEvents: number;
+    };
+    expect(firstPoll.events[0]?.id).toBe(received.message.id);
+    expect(firstPoll.pendingEvents).toBe(1);
+    await first.stop();
+
+    const secondAgent = new FakeAgent();
+    const second = createAtalkGateway({
+      host: "127.0.0.1", port: 0, agent: asAgent(secondAgent), inboxStore,
+    });
+    await second.start();
+    try {
+      const replay = await fetch(`${second.url}/v1/events?mode=explicit`).then((response) => response.json()) as {
+        events: Array<{ actions: { ack: string; reply: string } }>;
+      };
+      const event = replay.events[0]!;
+      const reply = await fetch(`${second.url}${event.actions.reply}`, {
+        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ text: "after restart" }),
+      });
+      expect(reply.status).toBe(201);
+      expect(secondAgent.sent).toContainEqual({
+        to: "@human.test", text: "after restart", conversationId: "conversation",
+      });
+      expect((await fetch(`${second.url}${event.actions.ack}`, { method: "POST" })).status).toBe(200);
+      const empty = await fetch(`${second.url}/v1/events?mode=explicit`).then((response) => response.json()) as {
+        events: unknown[]; pendingEvents: number;
+      };
+      expect(empty).toEqual({ events: [], pendingEvents: 0 });
+    } finally {
+      await second.stop();
+    }
+  });
+
+  it("persists the gateway inbox with owner-only permissions", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "atalk-gateway-inbox-"));
+    const path = join(directory, "nested", "inbox.json");
+    try {
+      const inbox = new GatewayInbox(10, new FileGatewayInboxStore(path));
+      await inbox.push(incoming().message);
+      expect((await stat(path)).mode & 0o777).toBe(0o600);
+      const reopened = new GatewayInbox(10, new FileGatewayInboxStore(path));
+      await reopened.initialize();
+      expect(reopened.pending).toBe(1);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
     }
   });
 

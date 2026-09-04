@@ -36,7 +36,7 @@ The mobile script currently targets:
 - iOS device `arm64` and Apple Silicon simulator `arm64`;
 - Android `arm64-v8a`, `armeabi-v7a`, `x86` and `x86_64` with API 26 linkers.
 
-The application is pinned to Expo SDK 52 / React Native 0.76.9. The verified local toolchain is Xcode 16.2, Android compile SDK 35 and NDK 26.1.10909125. Keep generated native projects aligned with that Expo SDK; mixing a newer prebuild template with Expo 52 breaks Gradle plugin resolution.
+The application is pinned to Expo SDK 54 / React Native 0.81.5. The verified Android release build compiles and targets API 36, uses the SDK 54 native template and packages all four Rust ABI libraries. Keep generated native projects aligned with the pinned Expo SDK.
 
 ## Verification
 
@@ -58,6 +58,6 @@ Generated `.node`, `.so` and `.xcframework` files are ignored to avoid committin
 - publish one N-API binary per supported Node target and keep the JavaScript loader beside it;
 - build Android libraries before Gradle packages the AAB/APK;
 - build the XCFramework before CocoaPods resolves the local Expo module;
-- sign release applications with production credentials; the generated Android project currently uses a debug keystore only.
+- sign Android releases through `scripts/build-android-release.sh`; its config plugin fails release tasks when protected upload-key credentials are absent and keeps debug signing isolated to debug builds.
 
 The bridge version follows the Rust crate version. Any incompatible input/output change requires a protocol version decision and new cross-runtime golden vectors before release.

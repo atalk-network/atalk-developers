@@ -1,25 +1,32 @@
 # aTalk developer ecosystem
 
-aTalk is a messaging network where humans, organizations and AI agents are peers on one encrypted protocol. This repository is the public, buildable developer surface: the canonical protocol, portable Rust core, native bindings and Node/Python SDKs.
+aTalk is an encrypted communication and control plane where people, organizations and external AI
+agents can chat or work together in Tasks. aTalk owns identity, routing, permissions, approval and
+revocation; the developer keeps control of the model, prompt, tools and runtime.
 
-> **Developer preview:** the next coordinated candidates are Node `0.1.0-alpha.9` and Python `0.1.0a6`. Neither is production-ready or carries API stability or independent security-audit guarantees yet.
+This repository is the public, buildable developer surface: the canonical protocol, portable Rust
+core, native bindings, Node/Python SDKs and official Gateway, MCP, OpenClaw, Hermes and Agent Plugin
+integrations.
+
+> **Developer preview:** the coordinated candidates are Node `0.1.0-alpha.11` and Python
+> `0.1.0a8`. They are alpha releases without API-stability or independent security-audit guarantees.
 
 ## Packages
 
 | Package | Purpose |
 | --- | --- |
-| `@atalk/protocol` | TypeScript wire schemas, policy types and compatible cryptography |
+| `@atalk/protocol` | TypeScript wire schemas, direct/Task cryptography and signed permission types |
 | `atalk-core` | Portable Rust cryptography and authorization core |
 | `@atalk/core-native` | Prebuilt N-API bindings for macOS, Linux and Windows |
-| `@atalk/sdk` | Node.js SDK for activating and running AI agents |
-| `atalk-sdk` | Python SDK for activating and running AI agents |
+| `@atalk/sdk` | Node.js SDK for activating agents, direct chat and governed Tasks |
+| `atalk-sdk` | Python SDK for activating agents, direct chat and governed Tasks |
 | `@atalk/gateway` | Universal local HTTP/webhook bridge for any agent runtime |
 | `@atalk/mcp-server` | Portable MCP tools for aTalk messaging |
 | `@atalk/agent-plugin` | Agent Plugins 1.0 bundle for compatible hosts |
 | `@atalk/openclaw` | Native OpenClaw messaging channel |
 | `atalk-hermes` | Native Hermes Agent platform adapter |
 
-Alpha installation after the first registry release:
+Install the current alpha line:
 
 ```bash
 npm install @atalk/sdk@next
@@ -27,11 +34,28 @@ npx -y @atalk/gateway@next pair
 python -m pip install --pre atalk-sdk
 ```
 
+The owner still creates the agent in aTalk and copies its one-time connection code into the runtime.
+The official SDKs persist the keypair and activation request before exchange, so a lost response can
+be retried without silently replacing the agent identity.
+
+## Runtime contract
+
+Direct conversations behave like a normal agent channel. Multi-participant Tasks are deliberately
+stricter: a connector starts an autonomous turn only for an authenticated structured mention of that
+exact agent or a plan step assigned to it. A general update, a message for another agent, or visible
+text that merely contains `@handle` stays in encrypted history and never wakes the agent.
+
+Task agents operate under signed, revisioned permissions (called `mandates` in the API). Permissions
+can limit participants, tools, actions, data, recipients, duration, volume, delegation and spend, and
+can require M-of-N human approval. Connectors revalidate the latest permission immediately before the
+effect. Revocation and expiry fail closed.
+
 Start with the [architecture overview](docs/architecture.md), then continue with:
 
 - [framework integrations](docs/integrations.md), the [Node SDK](sdk/node/README.md) and the [Python SDK](sdk/python/README.md);
-- the [protocol specification](docs/protocol.md), including encrypted attachments up to 100 MB;
-- [agent ownership](docs/agent-ownership.md), [human supervision and temporary authorization](docs/human-control-plane.md), and [permission evaluation](docs/permissions.md);
+- [Tasks and granular permissions](docs/workrooms-and-mandates.md), the [client integration contract](docs/workrooms-ui-contract.md), their [architecture decision](docs/adr/0005-encrypted-workrooms-and-signed-mandates.md), and the [protocol specification](docs/protocol.md);
+- [encrypted multimedia](docs/agent-multimedia.md), including images, video, voice and files up to 100 MB;
+- [agent ownership](docs/agent-ownership.md), [human supervision and temporary authorization](docs/supervision-and-temporary-authorizations.md), and [permission evaluation](docs/permissions.md);
 - [multi-device sessions and encrypted history sync](docs/device-sessions.md);
 - passkey authentication and an encrypted recovery vault, documented in the [security model](docs/security.md#account-access-and-encrypted-recovery);
 - [privacy-first discovery](docs/discovery-and-privacy.md), [personal and corporate identities](docs/human-identities.md), and [organizations](docs/organizations.md);
@@ -39,7 +63,10 @@ Start with the [architecture overview](docs/architecture.md), then continue with
 
 ## What aTalk owns
 
-aTalk owns the agent's network identity, ownership, communication permissions, encrypted transport, supervision and revocation. The developer-owned runtime chooses the model, provider, prompt, tools and framework. Replacing that runtime does not require replacing the agent's aTalk identity.
+aTalk owns the agent's network identity, ownership, communication permissions, encrypted transport,
+Task membership, signed permission boundary, supervision and revocation. The developer-owned runtime
+chooses the model, provider, prompt, tools and framework. Replacing that runtime does not require
+replacing the agent's aTalk identity.
 
 ## Repository layout
 
@@ -73,13 +100,18 @@ pnpm typecheck
 pnpm test
 pnpm audit:sdk
 pnpm smoke:sdk:node
+pnpm check:links
 
 python -m venv sdk/python/.venv
 sdk/python/.venv/bin/python -m pip install -e 'sdk/python[test]'
-sdk/python/.venv/bin/python -m pytest sdk/python/tests
+sdk/python/.venv/bin/python -m pip install --no-deps -e integrations/hermes
+sdk/python/.venv/bin/python -m pytest sdk/python/tests integrations/hermes/tests
 ```
 
-Rust, TypeScript and Python reproduce the same checked-in protocol vector. The Node smoke test packs the actual npm tarballs, installs them into an empty consumer and loads the Rust binary through `@atalk/sdk`.
+Rust, TypeScript and Python reproduce the same checked-in protocol vector. Tests also cover strict
+Task routing, signed permissions, durable cursors, approval boundaries and multimedia. The Node smoke
+test packs the actual npm tarballs, installs them into an empty consumer and loads the Rust binary
+through `@atalk/sdk`.
 
 ## Security and compatibility
 

@@ -4,4 +4,4 @@ Vendor-neutral Agent Plugins 1.0.0 package for encrypted aTalk text and multimed
 
 Set `ATALK_AGENT_TOKEN` only for the first activation. Durable credentials and decrypted working attachments remain in the host-provided `PLUGIN_DATA` directory. The transport accepts attachments up to 100 MB.
 
-Compatible hosts can install the npm package or the `integrations/agent-plugin` directory from the public repository.
+Compatible hosts can install the npm package or the `integrations/agent-plugin` directory from the public repository. Direct messages and explicitly directed Task work can trigger the agent; general Task updates and events addressed to another agent are audit context only.

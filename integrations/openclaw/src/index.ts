@@ -1,6 +1,7 @@
 import { defineChannelPluginEntry } from "openclaw/plugin-sdk/channel-core";
 import { atalkPlugin } from "./channel.js";
 import { setAtalkRuntime } from "./runtime.js";
+import { registerAtalkTaskTools } from "./tools.js";
 
 interface PortableChannelEntry {
   id?: string;
@@ -15,6 +16,7 @@ const entry = defineChannelPluginEntry({
   description: "Native end-to-end encrypted aTalk text and multimedia channel",
   plugin: atalkPlugin,
   setRuntime: setAtalkRuntime,
+  registerFull: registerAtalkTaskTools,
 }) as unknown as PortableChannelEntry;
 
 export default entry;

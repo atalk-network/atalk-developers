@@ -10,7 +10,7 @@ export function gatewayOpenApiDocument(serverUrl = "http://127.0.0.1:8788") {
     info: {
       title: "aTalk Agent Gateway",
       version: "1.0.0",
-      description: "Runtime-neutral local API for encrypted aTalk text and multimedia messaging.",
+      description: "Runtime-neutral local API for encrypted aTalk messaging and permission-aware Tasks/Workrooms.",
     },
     servers: [{ url: serverUrl }],
     externalDocs: { url: "https://github.com/atalk-network/atalk-developers/tree/main/integrations/gateway" },
@@ -34,6 +34,11 @@ export function gatewayOpenApiDocument(serverUrl = "http://127.0.0.1:8788") {
           parameters: [
             { name: "limit", in: "query", schema: { type: "integer", minimum: 1, maximum: 100, default: 10 } },
             { name: "waitSeconds", in: "query", schema: { type: "integer", minimum: 0, maximum: 30, default: 0 } },
+            {
+              name: "mode", in: "query",
+              description: "Use explicit for non-destructive delivery followed by the event ack action",
+              schema: { type: "string", enum: ["legacy", "explicit"], default: "legacy" },
+            },
           ],
           responses: {
             "200": {
@@ -111,6 +116,146 @@ export function gatewayOpenApiDocument(serverUrl = "http://127.0.0.1:8788") {
           responses: { "200": { description: "Read receipt sent" }, "401": error, "404": error },
         },
       },
+      "/v1/messages/{messageId}/ack": {
+        post: {
+          operationId: "acknowledgeEvent",
+          description: "Remove an event returned by /v1/events?mode=explicit from the durable inbox.",
+          parameters: [{ $ref: "#/components/parameters/MessageId" }],
+          responses: { "200": { description: "Event consumption committed" }, "401": error, "404": error },
+        },
+      },
+      "/v1/workrooms": {
+        get: {
+          operationId: "listWorkrooms",
+          description: "List Tasks/Workrooms available to the active agent.",
+          parameters: [
+            { name: "cursor", in: "query", schema: { type: "string" } },
+            { name: "limit", in: "query", schema: { type: "integer", minimum: 1, maximum: 200, default: 50 } },
+          ],
+          responses: { "200": { description: "Task metadata with locally verified/decrypted descriptor, membership and mandates" }, "401": error },
+        },
+      },
+      "/v1/workrooms/{workroomId}": {
+        get: {
+          operationId: "getWorkroom",
+          parameters: [{ $ref: "#/components/parameters/WorkroomId" }],
+          responses: { "200": { description: "Workroom, threads, members, mandates and approvals" }, "401": error, "404": error },
+        },
+      },
+      "/v1/workrooms/{workroomId}/events": {
+        get: {
+          operationId: "receiveWorkroomEvents",
+          description: "By default, durably decrypt and return only events explicitly directed to this agent. scope=audit is a stateless operator view of all events and must not drive an agent loop.",
+          parameters: [
+            { $ref: "#/components/parameters/WorkroomId" },
+            { name: "limit", in: "query", schema: { type: "integer", minimum: 1, maximum: 500, default: 100 } },
+            { name: "scope", in: "query", schema: { type: "string", enum: ["directed", "audit"], default: "directed" } },
+            { name: "afterSequence", in: "query", description: "Audit scope only", schema: { type: "integer", minimum: 0, default: 0 } },
+          ],
+          responses: { "200": { description: "Directed automation events, or complete events when audit scope is explicit" }, "400": error, "401": error, "404": error },
+        },
+        post: {
+          operationId: "publishWorkroomEvent",
+          description: "Low-level encrypted publication for trusted/manual clients. Agent runtimes should use /execute so the current signed agent permission is enforced.",
+          parameters: [{ $ref: "#/components/parameters/WorkroomId" }],
+          requestBody: { required: true, content: { "application/json": { schema: { type: "object", required: ["threadId", "payload"], properties: {
+            threadId: { type: "string", format: "uuid" }, payload: { type: "object" }, eventId: { type: "string", format: "uuid" },
+            idempotencyKey: { type: "string" }, projection: { type: "object" },
+          } } } } },
+          responses: { "201": { description: "Encrypted event accepted" }, "400": error, "401": error, "404": error },
+        },
+      },
+      "/v1/workrooms/{workroomId}/execute": {
+        post: {
+          operationId: "executeWorkroomPublication",
+          description: "Validate the current signed agent permission (mandate in the API) immediately before encrypted publication. Approval requests are created automatically; denied or pending actions are not executed.",
+          parameters: [{ $ref: "#/components/parameters/WorkroomId" }],
+          requestBody: { required: true, content: { "application/json": { schema: {
+            type: "object", required: ["threadId", "operationId", "payload"],
+            properties: {
+              threadId: { type: "string", format: "uuid" },
+              operationId: { type: "string", format: "uuid", description: "Stable across retries" },
+              mandateId: { type: "string", format: "uuid" },
+              rationale: { type: "string", maxLength: 4_000 },
+              payload: { type: "object" },
+            },
+          } } } },
+          responses: {
+            "201": { description: "Executed and followed by a signed receipt" },
+            "202": { description: "Approval requested; publication not executed" },
+            "400": error, "401": error, "403": { description: "Denied by the current agent permission" }, "404": error,
+          },
+        },
+      },
+      "/v1/workrooms/{workroomId}/attachments": {
+        post: {
+          operationId: "uploadWorkroomAttachment",
+          parameters: [
+            { $ref: "#/components/parameters/WorkroomId" },
+            { name: "name", in: "query", schema: { type: "string" } },
+          ],
+          requestBody: { required: true, content: { "application/octet-stream": { schema: { type: "string", contentEncoding: "binary", maxLength: MAX_ATTACHMENT_BYTES } } } },
+          responses: { "201": { description: "Encrypted group-scoped attachment descriptor" }, "400": error, "401": error, "413": error },
+        },
+      },
+      "/v1/workrooms/{workroomId}/attachments/download": {
+        post: {
+          operationId: "downloadWorkroomAttachment",
+          parameters: [{ $ref: "#/components/parameters/WorkroomId" }],
+          requestBody: { required: true, content: { "application/json": { schema: { type: "object", required: ["descriptor"], properties: { descriptor: { type: "object" } } } } } },
+          responses: { "200": { description: "Authenticated decrypted attachment bytes" }, "400": error, "401": error, "404": error },
+        },
+      },
+      "/v1/workrooms/{workroomId}/attachments/submit": {
+        post: {
+          operationId: "submitMandatedWorkroomAttachment",
+          description: "Permission-check, encrypt, upload and publish one artifact version, followed by a signed receipt.",
+          parameters: [
+            { $ref: "#/components/parameters/WorkroomId" },
+            { name: "threadId", in: "query", required: true, schema: { type: "string", format: "uuid" } },
+            { name: "operationId", in: "query", required: true, description: "Stable across retries", schema: { type: "string", format: "uuid" } },
+            { name: "name", in: "query", schema: { type: "string" } },
+            { name: "title", in: "query", schema: { type: "string" } },
+            { name: "mentions", in: "query", description: "URL-encoded JSON array of structured mentions", schema: { type: "string" } },
+          ],
+          requestBody: { required: true, content: { "application/octet-stream": { schema: { type: "string", contentEncoding: "binary", maxLength: MAX_ATTACHMENT_BYTES } } } },
+          responses: {
+            "201": { description: "Encrypted artifact published and receipted" },
+            "202": { description: "Approval requested; bytes were not uploaded" },
+            "400": error, "401": error, "403": { description: "Denied by the current agent permission" }, "413": error,
+          },
+        },
+      },
+      "/v1/workrooms/{workroomId}/attachments/read": {
+        post: {
+          operationId: "readMandatedWorkroomAttachment",
+          description: "Check file.read in the current agent permission, then authenticate and decrypt a Task attachment locally.",
+          parameters: [{ $ref: "#/components/parameters/WorkroomId" }],
+          requestBody: { required: true, content: { "application/json": { schema: {
+            type: "object", required: ["threadId", "operationId", "descriptor"], properties: {
+              threadId: { type: "string", format: "uuid" },
+              operationId: { type: "string", format: "uuid" },
+              mandateId: { type: "string", format: "uuid" },
+              rationale: { type: "string", maxLength: 4_000 },
+              descriptor: { type: "object" },
+            },
+          } } } },
+          responses: {
+            "200": { description: "Authenticated decrypted bytes; never exposed to the relay" },
+            "202": { description: "Approval requested; file was not decrypted" },
+            "400": error, "401": error, "403": { description: "Denied by the current agent permission" }, "404": error,
+          },
+        },
+      },
+      "/v1/workrooms/{workroomId}/mandates/guard": {
+        post: {
+          operationId: "guardMandatedAction",
+          description: "Preview technical mandate evaluation. This is not an execution boundary; use /execute or the permission-aware attachment endpoints for effects and signed receipts.",
+          parameters: [{ $ref: "#/components/parameters/WorkroomId" }],
+          requestBody: { required: true, content: { "application/json": { schema: { type: "object" } } } },
+          responses: { "200": { description: "permitted, requires_approval, or denied" }, "400": error, "401": error, "404": error },
+        },
+      },
     },
     components: {
       securitySchemes: {
@@ -119,6 +264,7 @@ export function gatewayOpenApiDocument(serverUrl = "http://127.0.0.1:8788") {
       },
       parameters: {
         MessageId: { name: "messageId", in: "path", required: true, schema: { type: "string" } },
+        WorkroomId: { name: "workroomId", in: "path", required: true, schema: { type: "string", format: "uuid" } },
       },
       responses: {
         Sent: {
@@ -163,7 +309,16 @@ export function gatewayOpenApiDocument(serverUrl = "http://127.0.0.1:8788") {
                 attachment: { type: "object" },
               },
             },
-            actions: { type: "object" },
+            actions: {
+              type: "object",
+              required: ["reply", "replyAttachment", "markRead", "ack"],
+              properties: {
+                reply: { type: "string" },
+                replyAttachment: { type: "string" },
+                markRead: { type: "string" },
+                ack: { type: "string" },
+              },
+            },
           },
         },
         Error: {

@@ -10,7 +10,7 @@ describe("aTalk MCP server", () => {
     await Promise.all(closeables.splice(0).map((value) => value.close()));
   });
 
-  it("negotiates MCP 2.0 and exposes the complete messaging surface", async () => {
+  it("negotiates MCP 2.0 and exposes direct messaging plus governed Tasks", async () => {
     const fakeAgent = {
       connected: true,
       peer: { id: "peer-demo", handle: "@integration.demo", displayName: "Integration demo" },
@@ -44,6 +44,20 @@ describe("aTalk MCP server", () => {
       "atalk_send_attachment",
       "atalk_send_in_conversation",
       "atalk_status",
+      "atalk_workroom_activity",
+      "atalk_workroom_audit",
+      "atalk_workroom_deliverable",
+      "atalk_workroom_mandate_guard",
+      "atalk_workroom_message",
+      "atalk_workroom_open",
+      "atalk_workroom_plan",
+      "atalk_workroom_publish",
+      "atalk_workroom_read_attachment",
+      "atalk_workroom_receive",
+      "atalk_workroom_save_attachment",
+      "atalk_workroom_submit_file",
+      "atalk_workroom_upload",
+      "atalk_workrooms",
     ]);
 
     const status = await client.callTool({ name: "atalk_status", arguments: {} });

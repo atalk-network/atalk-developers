@@ -2,45 +2,57 @@
 
 ## Product boundary
 
-aTalk is a communication network. It does not build, host or orchestrate AI agents. Every message path uses one peer model and one envelope regardless of whether a peer is a human, an agent or an organization.
+aTalk is a communication and control plane for people, organizations and AI agents. It does not
+build, host or run the model, prompt or tools behind an agent. It gives that external runtime a
+durable identity and coordinates encrypted communication and Tasks under owner-controlled permissions.
 
 ## Runtime view
 
 ```text
-Web / Expo human client          Node agent        Python agent
- Rust via Swift/JNI or web          Rust via N-API     PyNaCl adapter
-  local keys + messages             local keys         local keys
-          |                               |
-          +-- resolve/authorize ----------+
-          |        backend API            |
-          |                               |
-          +==== encrypted WebSocket ======+
+Expo human client          Native connectors       Universal Gateway
+ Rust via Swift/JNI        OpenClaw/Hermes/MCP       HTTP + webhooks
+  local keys + messages       local keys            Node SDK + local keys
+          |                        |                         |
+          +----------- resolve/authorize ------------------+
+          |                 backend API                     |
+          |                                                 |
+          +============ encrypted WebSocket ================+
                     relay
-                  /       \
-        encrypted mailbox  opaque attachment parts
-          + sync journal      (temporary storage)
-             (PostgreSQL)
+                      |
+       encrypted mailbox + sync journal
+                (PostgreSQL)
 ```
 
-The backend owns identity aliases, public keys, organization membership, permissions, presence and temporary ciphertext. Private keys and plaintext conversation history stay on peers.
-
-Custom agent runtimes may connect through the localhost-first `@atalk/gateway` sidecar. It owns the Node SDK session and local keys while exposing a versioned HTTP, long-polling and signed-webhook contract. Native OpenClaw, Hermes and MCP adapters remain direct paths and do not depend on the Gateway.
+The backend owns identity aliases, public keys, organization membership, permission commitments,
+presence and the routing metadata needed for delivery and Task history. Private keys, Task objectives,
+message bodies, file metadata and plaintext conversation history stay on participant devices and
+agent runtimes.
 
 ## Modules
 
 - **Protocol:** `core/rust` is the portable implementation of canonical serialization, NaCl-compatible encryption/signatures and permission decisions. The backend and Node SDK call it through N-API. Expo calls it through Swift/C on iOS and Kotlin/JNI on Android. TypeScript remains the wire-schema package and web fallback; Python preserves an independent compatible implementation.
 - **Identity:** OTP, WebAuthn passkeys, encrypted recovery vault, trusted-device linking, peer public keys and opaque per-device sessions.
 - **Organizations:** organizations, OWNER/ADMIN/MEMBER memberships, invitations and DNS TXT verification.
-- **Agents:** explicit personal or organization ownership, creator audit, one-time activation credentials, independent agent keys and revocation.
-- **Agent Gateway:** runtime-neutral HTTP/webhook adapter over the Node SDK, with text, media, voice, receipts and supervision actions. Listening outside localhost requires API authentication.
-- **Human control plane:** encrypted activity mirrors, human intervention and bilateral, exact-pair authorizations with approval, expiry and immediate revocation. One request may create up to ten independent pair grants.
-- **Discovery:** authenticated partial handle/display-name search with private-by-default public visibility and independently configurable organization visibility.
+- **Agents:** explicit personal or organization ownership, creator audit, crash-safe one-time activation, independently rotatable runtime sessions, independent agent keys and revocation.
+- **Agent Gateway:** a localhost-first, versioned HTTP/webhook sidecar over the Node SDK. It lets an arbitrary runtime use aTalk without implementing envelopes, WebSocket recovery, receipts, attachments, or supervision semantics. Native connectors remain direct paths and do not depend on it.
+- **Discovery:** authenticated partial handle/display-name search with private-by-default public visibility, independently configurable organization visibility, contacts, QR and direct links.
+- **Human control plane:** encrypted activity mirrors, explicit owner intervention and bilateral,
+  expiring agent-to-agent authorizations. A batch request still creates independent exact-pair grants.
+- **Tasks / workrooms:** multi-human and multi-agent membership, signed external consent, encrypted
+  objectives, threads, plans, artifacts, deliverables and immutable event projections. Structured
+  recipients and plan assignments are the only signals that start an autonomous agent turn; general
+  room traffic remains auditable but non-triggering.
+- **Agent permissions / mandates:** signed, encrypted and revocable terms limit participants,
+  actions, tools, data, time, volume, delegation and spend. Sensitive operations can require an
+  M-of-N human approval before the connector executes them.
 - **Policy:** deterministic intersection of block state, organization policy, agent incoming policy and agent outgoing policy.
 - **Relay:** authenticated WebSocket routing with stable message IDs and receipts.
 - **Mailbox:** ciphertext-only, seven-day default TTL, explicit acknowledgement and deletion.
 - **Sync:** ciphertext-only sender/recipient journal, 30-day default TTL and monotonically increasing per-device cursors.
-- **Attachments:** locally encrypted files, images and videos up to 100 MB, split into opaque parts of at most 8 MB with a 30-day default transport TTL.
-- **Push:** generic wake-up events only; providers receive no message, sender, handle or conversation data.
+- **Attachments:** independently authenticated encrypted chunks for images, video, voice and files up
+  to 100 MB. Names, MIME types, captions, keys and part maps remain inside encrypted descriptors.
+- **Push and safety:** generic wake-ups with no message content, effective blocking and reports that
+  retain category and routing/evidence identifiers without copying plaintext content.
 
 ## Native core boundary
 
@@ -54,9 +66,18 @@ The first runnable transport is WebSocket relay because it proves the product an
 
 ## Deployment
 
-One backend process and one PostgreSQL database. Redis and dedicated object storage are not required for the first deployment. Horizontal relay fan-out and external blob storage become relevant only after real concurrency and mailbox/attachment-volume data exists.
+One backend process and one PostgreSQL database are sufficient for the current preview. Redis and
+dedicated object storage are not required for this deployment. Horizontal relay fan-out, shared edge
+rate limits and external blob storage become relevant after real concurrency and attachment-volume
+data exists.
 
-`PostgresStore` is selected with `STORAGE_DRIVER=postgres` and persists OTP challenges, passkey public credentials, encrypted recovery vaults, opaque sessions, trusted-device link requests, peers, organization membership, domains, invitations, agent activation/policy, temporary authorization records, blocks, message deduplication, ciphertext-only mailbox items, the ciphertext sync journal and opaque attachment parts. Multi-record mutations use database transactions; message IDs use an atomic `ON CONFLICT DO NOTHING` insert. The in-memory store is retained only for disposable tests and development.
+`PostgresStore` is selected with `STORAGE_DRIVER=postgres` and persists OTP challenges, passkey
+public credentials, encrypted recovery vaults, opaque sessions, trusted-device link requests, peers,
+organizations, agent activation/policy, blocks, reports, ciphertext-only direct mailboxes and sync
+journals, encrypted attachment parts, and the signed/ciphertext workroom records described in
+`workrooms-and-mandates.md`. Multi-record mutations use transactions; direct message IDs and
+actor-scoped Task idempotency keys use atomic conflict handling. The in-memory store is retained only
+for disposable tests and development.
 
 An agent has exactly one owner. A personal agent points to one human peer; an organization agent points to one organization and never to the human who happened to create it. `created_by_peer_id` is immutable audit data, not an authorization shortcut. Current organization roles determine who can manage an organization-owned agent, so a creator leaving the organization does not orphan or retain control of it. See `agent-ownership.md`.
 
@@ -64,19 +85,26 @@ An agent has exactly one owner. A personal agent points to one human peer; an or
 
 - A peer trusts its local secure storage and explicitly resolved public keys.
 - The directory can deny or misroute service, but cannot decrypt valid payloads.
-- A stolen activation/session token can impersonate a peer until revoked; tokens are stored as hashes server-side and agent activation credentials are one-time.
-- A trusted device can receive a client-encrypted identity-key bundle. Revocation stops future access but cannot erase keys or plaintext already obtained by that device.
-- Attachment names, MIME types, captions, keys and part maps stay inside the encrypted descriptor; the service still observes ciphertext sizes, upload timing and access timing.
+- A stolen session credential can impersonate a peer until revoked. Server-side credentials are
+  stored as hashes; activation accepts only the first exchange or a short exact replay bound to the
+  same request id and public keys.
 - Organization policy is enforced before the backend releases recipient keys and again before relay acceptance.
+- Task membership, event type, timestamps, participant ids and ciphertext sizes remain observable
+  routing metadata even though objectives, messages, mentions, plans, file descriptors and permission
+  terms are encrypted.
+- A connector can enforce and attest only work that passes through it. aTalk cannot prove an external
+  action that a runtime or third-party tool hides, so critical integrations still require review.
 
 ## Deferred production work
 
 - libp2p QUIC/WebRTC, AutoNAT, hole punching and circuit relay;
 - mobile hardware-backed key wrapping and encrypted SQLite hardening;
-- production APNs/FCM credentials and background-delivery validation;
+- production APNs/FCM credential rotation and background-delivery validation across physical devices;
 - signed App Store/Play Store release pipelines and hardware-device native smoke tests;
 - per-device message keys, key transparency and safety-number UX;
-- independent audit of passkeys and encrypted recovery, plus key rotation and MLS groups;
+- independent audit of passkeys, encrypted recovery and the Task authorization boundary;
+- identity/key rotation plus a reviewed MLS group-session upgrade for forward secrecy and post-compromise security;
 - multi-instance WebSocket presence fan-out.
 
-See [device sessions](device-sessions.md), [discovery and privacy](discovery-and-privacy.md), [push notifications](push-notifications.md), [protocol attachments](protocol.md#encrypted-attachments) and the [security model](security.md) for the corresponding boundaries.
+See `workrooms-and-mandates.md` for the Task trust boundary, `integrations.md` for runtime behavior,
+`agent-multimedia.md` for decrypted-file handling and `security.md` for explicit guarantees and gaps.

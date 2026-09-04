@@ -1,16 +1,54 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  createChunkedAttachmentDescriptor,
+  MAX_ATTACHMENT_BYTES,
+  ATTACHMENT_PLAINTEXT_CHUNK_BYTES,
   decodeAttachmentMessage,
   decryptAttachment,
   encodeAttachmentMessage,
   encryptAttachment,
+  encryptAttachmentChunk,
+  decryptAttachmentChunk,
   joinEncryptedAttachmentParts,
   splitEncryptedAttachment,
 } from "./attachments.js";
 import { utf8, fromUtf8 } from "./encoding.js";
 
 describe("encrypted attachments", () => {
+  it("encrypts v2 chunks independently for resumable transfers", () => {
+    let id = 1;
+    const descriptor = createChunkedAttachmentDescriptor({
+      id: "00000000-0000-4000-8000-000000000001",
+      size: 3,
+      name: "video.mp4",
+      mimeType: "video/mp4",
+      nextId: () => `00000000-0000-4000-8000-${String(++id).padStart(12, "0")}`,
+      nextNonce: () => new Uint8Array(24).fill(++id),
+    });
+    if (descriptor.version !== 2) throw new Error("Expected v2 descriptor");
+    const first = new Uint8Array(descriptor.chunks[0]!.plaintextSize).fill(7);
+    const encrypted = [encryptAttachmentChunk(first, descriptor, 0)];
+    expect(decryptAttachmentChunk(encrypted[0]!, descriptor, 0)).toEqual(first);
+    encrypted[0]![0] ^= 1;
+    expect(() => decryptAttachmentChunk(encrypted[0]!, descriptor, 0)).toThrow("ATTACHMENT_DECRYPTION_FAILED");
+  });
+
+  it("describes the 100 MB limit with bounded retry-friendly chunks without allocating the payload", () => {
+    let id = 100;
+    const descriptor = createChunkedAttachmentDescriptor({
+      id: "00000000-0000-4000-8000-000000000100",
+      size: MAX_ATTACHMENT_BYTES,
+      name: "archive.zip",
+      mimeType: "application/zip",
+      nextId: () => `00000000-0000-4000-8000-${String(++id).padStart(12, "0")}`,
+      nextNonce: () => new Uint8Array(24).fill(id % 255),
+    });
+    if (descriptor.version !== 2) throw new Error("Expected v2 descriptor");
+    expect(descriptor.chunks).toHaveLength(Math.ceil(MAX_ATTACHMENT_BYTES / ATTACHMENT_PLAINTEXT_CHUNK_BYTES));
+    expect(Math.max(...descriptor.chunks.map((chunk) => chunk.plaintextSize))).toBe(ATTACHMENT_PLAINTEXT_CHUNK_BYTES);
+  });
+
   it("encrypts the bytes and keeps the decryption material inside the E2EE message", () => {
     const encrypted = encryptAttachment({
       id: "11111111-1111-4111-8111-111111111111",

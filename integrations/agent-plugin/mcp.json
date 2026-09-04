@@ -4,7 +4,7 @@
     "atalk": {
       "type": "stdio",
       "command": "npx",
-      "args": ["-y", "@atalk/mcp-server@0.1.0-alpha.10"],
+      "args": ["-y", "@atalk/mcp-server@0.1.0-alpha.11"],
       "env": {
         "ATALK_BASE_URL": "https://api.atalk.ar",
         "ATALK_CREDENTIAL_PATH": "${PLUGIN_DATA}/agent-credentials.json",

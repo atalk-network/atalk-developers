@@ -1,6 +1,14 @@
 import type { IncomingMessage } from "@atalk/sdk";
 import { describe, expect, it } from "vitest";
-import { atalkPlugin, mediaKind, normalizeAtalkTarget, shouldRelaySupervisorMessage } from "./channel.js";
+import {
+  atalkPlugin,
+  mandateFailureMode,
+  mediaKind,
+  normalizeAtalkTarget,
+  renderWorkroomEvent,
+  shouldDispatchWorkroomEvent,
+  shouldRelaySupervisorMessage,
+} from "./channel.js";
 
 function messageWithMime(mimeType: string): IncomingMessage {
   return {
@@ -38,7 +46,44 @@ function messageWithMime(mimeType: string): IncomingMessage {
 describe("aTalk OpenClaw channel", () => {
   it("advertises multimedia support and normalizes handles", () => {
     expect(atalkPlugin.capabilities.media).toBe(true);
+    expect(atalkPlugin.capabilities.chatTypes).toContain("group");
     expect(normalizeAtalkTarget("atalk:voice.agent")).toBe("@voice.agent");
+  });
+
+  it("renders only this agent's executable Task steps", () => {
+    const ownStep = {
+      id: "research",
+      title: "Compare public sources",
+      status: "executing" as const,
+      assignedPeerIds: ["33333333-3333-4333-8333-333333333333"],
+      dependsOnStepIds: [],
+    };
+    const rendered = renderWorkroomEvent({ content: {
+      version: 1,
+      kind: "plan",
+      planVersion: 1,
+      summary: "Prepare the market report",
+      steps: [ownStep, {
+        id: "sales",
+        title: "Negotiate the contract",
+        status: "executing",
+        assignedPeerIds: ["44444444-4444-4444-8444-444444444444"],
+        dependsOnStepIds: [],
+      }],
+    }, routing: { directedToMe: true, directMentions: [], assignedSteps: [ownStep] } });
+    expect(rendered).toContain("Compare public sources");
+    expect(rendered).not.toContain("Negotiate the contract");
+  });
+
+  it("starts a Task turn only for the agent selected by structured routing", () => {
+    const directed = { directedToMe: true, directMentions: [], assignedSteps: [] };
+    const undirected = { directedToMe: false, directMentions: [], assignedSteps: [] };
+    expect(shouldDispatchWorkroomEvent({ directedToMe: true, routing: directed })).toBe(true);
+    expect(shouldDispatchWorkroomEvent({ directedToMe: false, routing: undirected })).toBe(false);
+    expect(shouldDispatchWorkroomEvent({ directedToMe: true, routing: undirected })).toBe(false);
+    // Plain-text @names are intentionally irrelevant here: the SDK derives
+    // this bit only from authenticated mentions/assignments by peer id.
+    expect(shouldDispatchWorkroomEvent({ directedToMe: false, routing: undirected })).toBe(false);
   });
 
   it("classifies encrypted voice notes as audio media", () => {
@@ -50,5 +95,11 @@ describe("aTalk OpenClaw channel", () => {
     expect(shouldRelaySupervisorMessage({ isSupervisor: true, isMentioned: true })).toBe(false);
     expect(shouldRelaySupervisorMessage({ isSupervisor: true, isMentioned: false })).toBe(true);
     expect(shouldRelaySupervisorMessage({ isSupervisor: false, isMentioned: false })).toBe(false);
+  });
+
+  it("retries approval waits without poisoning the poll loop on terminal denial", () => {
+    expect(mandateFailureMode({ status: "requires_approval" })).toBe("retry");
+    expect(mandateFailureMode({ status: "denied" })).toBe("stop");
+    expect(mandateFailureMode({ status: "executed" })).toBeUndefined();
   });
 });

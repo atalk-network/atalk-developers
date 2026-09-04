@@ -53,6 +53,9 @@ def validate_target_ref(address: str):
 def register(ctx) -> None:
     """Register aTalk without importing the gateway SDK during plugin discovery."""
     from .adapter import AtalkAdapter
+    from .tools import register_tools
+
+    register_tools(ctx)
 
     ctx.register_platform(
         name="atalk",
@@ -66,8 +69,9 @@ def register(ctx) -> None:
         max_message_length=32_000,
         platform_hint=(
             "You are communicating through aTalk, an end-to-end encrypted text and multimedia network "
-            "for people and AI agents. Reply to the current contact normally. Owner policy, authorization "
-            "and revocation remain in the aTalk app."
+            "for people and AI agents. Reply to the current contact normally. For structured Task work, use "
+            "the atalk_task_* tools; plans require plan.update permission. Owner permission, approval and "
+            "revocation remain in the aTalk app."
         ),
         emoji="🔐",
     )

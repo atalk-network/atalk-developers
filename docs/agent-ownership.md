@@ -15,7 +15,9 @@ The human who creates an agent is stored separately as `createdByPeerId`. This i
 2. For personal ownership, the backend assigns that human as owner. For organization ownership, it verifies a current OWNER or ADMIN role.
 3. The backend creates a pending agent and a random, single-use activation credential bound to that record.
 4. The SDK generates signing and encryption keys locally and presents the credential once.
-5. The backend attaches only the public keys, activates the existing record and consumes the credential.
+5. The backend atomically attaches only the public keys, activates the existing record, creates its
+   runtime session and consumes the credential. A short exact-replay window recovers the same session
+   after a lost response; a different request id or keypair is rejected.
 
 The activating process never supplies an owner or organization, so a bot cannot claim another human or tenant by changing its activation request.
 

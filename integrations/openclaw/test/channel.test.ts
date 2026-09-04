@@ -27,9 +27,9 @@ describe("OpenClaw aTalk channel", () => {
     expect(account.credentialPath).toContain(".atalk/openclaw-agent.json");
   });
 
-  it("declares a direct encrypted channel", () => {
+  it("declares direct chats and encrypted multi-participant Tasks", () => {
     expect(atalkPlugin.id).toBe("atalk");
-    expect(atalkPlugin.capabilities.chatTypes).toEqual(["direct"]);
+    expect(atalkPlugin.capabilities.chatTypes).toEqual(["direct", "group"]);
     expect(atalkPlugin.outbound?.deliveryMode).toBe("direct");
   });
 });

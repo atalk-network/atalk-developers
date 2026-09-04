@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
 const directory = resolve(process.argv[2] ?? "integrations/agent-plugin");
+const pkg = JSON.parse(await readFile(resolve(directory, "package.json"), "utf8"));
 const plugin = JSON.parse(await readFile(resolve(directory, "plugin.json"), "utf8"));
 const mcp = JSON.parse(await readFile(resolve(directory, "mcp.json"), "utf8"));
 
@@ -23,6 +24,13 @@ if (Object.hasOwn(server.env ?? {}, "PLUGIN_ROOT") || Object.hasOwn(server.env ?
 }
 if (!String(server.env?.ATALK_CREDENTIAL_PATH).startsWith("${PLUGIN_DATA}/")) {
   throw new Error("aTalk credentials must live under PLUGIN_DATA");
+}
+if (pkg.version !== plugin.version) {
+  throw new Error("package.json and plugin.json versions must match");
+}
+const serverPackage = server.args.find((value) => String(value).startsWith("@atalk/mcp-server@"));
+if (!serverPackage?.endsWith(pkg.version)) {
+  throw new Error("mcp.json must pin the matching @atalk/mcp-server version");
 }
 
 console.log(`Validated Agent Plugin ${plugin.name} ${plugin.version}`);

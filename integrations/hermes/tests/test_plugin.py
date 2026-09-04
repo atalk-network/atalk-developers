@@ -1,6 +1,31 @@
-import os
+import importlib.util
+from pathlib import Path
+import tomllib
 
 from atalk_hermes import env_enablement, parse_target_ref, validate_target_ref
+
+
+def test_directory_plugin_manifest_matches_pypi_package():
+    directory = Path(__file__).parents[1]
+    project = tomllib.loads((directory / "pyproject.toml").read_text())["project"]
+    manifest = (directory / "plugin.yaml").read_text()
+    assert (directory / "__init__.py").is_file()
+    assert (directory / "adapter.py").is_file()
+    assert f"version: {project['version']}" in manifest
+    assert f'atalk-sdk>={project["version"]},<0.2' in manifest
+
+
+def test_directory_plugin_entrypoint_is_importable():
+    directory = Path(__file__).parents[1]
+    spec = importlib.util.spec_from_file_location(
+        "atalk_directory_plugin",
+        directory / "__init__.py",
+        submodule_search_locations=[str(directory)],
+    )
+    assert spec is not None and spec.loader is not None
+    plugin = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(plugin)
+    assert callable(plugin.register)
 
 
 def test_target_normalization():

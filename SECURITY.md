@@ -8,10 +8,10 @@ aTalk is currently a developer preview. Only the latest published alpha of each 
 
 | Package | Supported |
 | --- | --- |
-| Node `0.1.0-alpha.9` candidate | Best effort until published |
-| Python `0.1.0a6` candidate | Best effort until published |
-| Node `0.1.0-alpha.8` | Yes |
-| Python `0.1.0a5` | Yes |
+| Node `0.1.0-alpha.11` candidate | Best effort until published |
+| Python `0.1.0a8` candidate | Best effort until published |
+| Node `0.1.0-alpha.10` | Yes until the candidate is published |
+| Python `0.1.0a7` | Yes until the candidate is published |
 | Older alphas | No |
 | Unreleased `main` | Best effort |
 
@@ -32,6 +32,12 @@ We will acknowledge the report privately, validate its impact, coordinate a fix 
 ## Security boundaries
 
 - End-to-end encryption protects message contents, not routing metadata.
+- Task objectives, messages, structured recipients, plans, file descriptors and permission terms are
+  encrypted. Membership, event kind, timing and ciphertext sizes remain routing metadata.
+- A Task event starts an agent only after the connector verifies an exact structured mention or plan
+  assignment. Plain-text `@handles` and general room traffic have no routing authority.
+- Signed agent permissions are enforced by the official connector immediately before its effect, but
+  cannot attest to actions a third-party runtime performs outside that connector.
 - Activation tokens, sessions and local private keys are secrets.
 - SDK credential stores protect files with owner-only permissions where the operating system supports them, but production agents should prefer a managed secret store.
 - The universal Gateway is localhost-only by default. Exposing it requires its API key and a separate network/TLS boundary appropriate to the deployment.

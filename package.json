@@ -1,8 +1,8 @@
 {
   "name": "atalk-developers",
-  "version": "0.1.0-alpha.9",
+  "version": "0.1.0-alpha.11",
   "private": true,
-  "description": "Public protocol, Rust core and SDK workspace for the aTalk messaging network",
+  "description": "Public protocol, Rust core, SDKs and agent integrations for aTalk encrypted Tasks",
   "packageManager": "pnpm@11.19.0",
   "engines": {
     "node": ">=20.17"
@@ -13,6 +13,8 @@
     "test": "pnpm --dir core/protocol build && pnpm --dir sdk/node build && pnpm -r --if-present test && cargo test --workspace",
     "typecheck": "pnpm --dir core/protocol build && pnpm --dir sdk/node build && pnpm -r --if-present typecheck",
     "audit:sdk": "node scripts/audit-sdk-runtime.mjs",
+    "check:links": "node scripts/check-doc-links.mjs",
+    "check:links:remote": "node scripts/check-doc-links.mjs --remote",
     "smoke:sdk:node": "node scripts/smoke-node-packages.mjs",
     "verify:release:node": "node scripts/verify-release-versions.mjs node",
     "verify:release:python": "node scripts/verify-release-versions.mjs python"

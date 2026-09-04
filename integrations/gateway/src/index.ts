@@ -8,9 +8,14 @@ export {
   type GatewayMessageEvent,
 } from "./gateway.js";
 export {
+  FileGatewayInboxStore,
   GatewayInbox,
+  MemoryGatewayInboxStore,
+  recordGatewayMessage,
   serializeGatewayMessage,
   type GatewayAttachment,
+  type GatewayInboxRecord,
+  type GatewayInboxStore,
   type GatewaySender,
 } from "./inbox.js";
 export { gatewayOpenApiDocument } from "./openapi.js";

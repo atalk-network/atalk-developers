@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "atalk-sdk"
-version = "0.1.0a7"
+version = "0.1.0a8"
 description = "Python SDK for the aTalk human and AI agent messaging network"
 readme = "README.md"
 license = "Apache-2.0"

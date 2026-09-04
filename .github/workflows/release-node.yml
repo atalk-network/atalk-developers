@@ -90,7 +90,6 @@ jobs:
       id-token: write
     env:
       NPM_CONFIG_PROVENANCE: "true"
-      NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
     steps:
       - uses: actions/checkout@v7
       - uses: pnpm/action-setup@v6
@@ -102,7 +101,7 @@ jobs:
           registry-url: https://registry.npmjs.org
           package-manager-cache: false
       - name: Install public package dependency graph
-        run: pnpm install --frozen-lockfile
+        run: pnpm --filter @atalk/gateway... --filter @atalk/openclaw... --filter @atalk/mcp-server... --filter @atalk/agent-plugin install --frozen-lockfile
       - name: Require a public publishing repository
         run: |
           visibility=$(curl --fail --silent --show-error \
@@ -136,17 +135,19 @@ jobs:
           pnpm --dir sdk/node build
           pnpm --dir sdk/node typecheck
           pnpm --dir sdk/node test
+          pnpm audit:sdk
+      - name: Build and test agent integrations
+        run: |
           pnpm --dir integrations/gateway build
           pnpm --dir integrations/gateway typecheck
           pnpm --dir integrations/gateway test
-          pnpm --dir integrations/mcp build
-          pnpm --dir integrations/mcp typecheck
-          pnpm --dir integrations/mcp test
           pnpm --dir integrations/openclaw build
           pnpm --dir integrations/openclaw typecheck
           pnpm --dir integrations/openclaw test
+          pnpm --dir integrations/mcp build
+          pnpm --dir integrations/mcp typecheck
+          pnpm --dir integrations/mcp test
           pnpm --dir integrations/agent-plugin test
-          pnpm audit:sdk
       - name: Preview root package contents without lifecycle side effects
         run: |
           (cd core/node-native && node ../../scripts/native-package-licenses.mjs stage)
@@ -154,8 +155,8 @@ jobs:
           pnpm --dir core/protocol pack --dry-run
           pnpm --dir sdk/node pack --dry-run
           pnpm --dir integrations/gateway pack --dry-run
-          pnpm --dir integrations/mcp pack --dry-run
           pnpm --dir integrations/openclaw pack --dry-run
+          pnpm --dir integrations/mcp pack --dry-run
           pnpm --dir integrations/agent-plugin pack --dry-run
       - name: Verify packed Node SDK public surface
         run: |
@@ -171,11 +172,9 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
       - name: Publish Node SDK
         run: node scripts/publish-package-if-missing.mjs sdk/node pnpm next
-      - name: Publish universal Agent Gateway
-        run: node scripts/publish-package-if-missing.mjs integrations/gateway pnpm next
-      - name: Publish MCP server
-        run: node scripts/publish-package-if-missing.mjs integrations/mcp pnpm next
-      - name: Publish portable Agent Plugin
-        run: node scripts/publish-package-if-missing.mjs integrations/agent-plugin pnpm next
-      - name: Publish OpenClaw channel
-        run: node scripts/publish-package-if-missing.mjs integrations/openclaw pnpm next
+      - name: Publish Gateway, OpenClaw, MCP and portable Agent Plugin
+        run: |
+          node scripts/publish-package-if-missing.mjs integrations/gateway pnpm next
+          node scripts/publish-package-if-missing.mjs integrations/openclaw pnpm next
+          node scripts/publish-package-if-missing.mjs integrations/mcp pnpm next
+          node scripts/publish-package-if-missing.mjs integrations/agent-plugin pnpm next
