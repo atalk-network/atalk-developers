@@ -12,7 +12,7 @@
     "build:native:node": "pnpm --filter @atalk/core-native build",
     "test": "pnpm --dir core/protocol build && pnpm --dir sdk/node build && pnpm -r --if-present test && cargo test --workspace",
     "typecheck": "pnpm --dir core/protocol build && pnpm --dir sdk/node build && pnpm -r --if-present typecheck",
-    "audit:sdk": "node scripts/audit-sdk-runtime.mjs",
+    "audit:sdk": "node --test scripts/audit-sdk-runtime.test.mjs && node scripts/audit-sdk-runtime.mjs",
     "check:links": "node scripts/check-doc-links.mjs",
     "check:links:remote": "node scripts/check-doc-links.mjs --remote",
     "smoke:sdk:node": "node scripts/smoke-node-packages.mjs",
