@@ -13,13 +13,20 @@ choose one of three policies:
 - **Compatible**: permit a newer release only inside the current compatibility line.
 
 The optional Runtime Manager is a separate parent process. The effective automation policy is the
-more restrictive of the owner's setting and the operator's local ceiling. A compromised runtime
-cannot expand that policy or substitute another package, registry, command, health endpoint or
-credential path.
+more restrictive of the owner's setting and the operator's local ceiling. Remote advisories cannot
+expand that policy or substitute another package, registry, command, health endpoint or credential
+path: those choices remain local and every downloaded release is verified before activation.
 
-The managed installers in this release target macOS and Linux. The SDKs and version-reporting API
-remain portable, but unattended replacement on Windows is intentionally deferred until the manager
-can provide equivalent process ownership, file-locking and credential-permission guarantees.
+The built-in manager is a supervisor and updater, not an operating-system sandbox. By default the
+manager and its child run as the same local user and therefore share one local trust domain. It
+protects against malicious or malformed control-plane input, registry substitution, broken releases
+and process failures; it does not contain a child that has already compromised that same OS account.
+Containing a hostile local runtime requires deployment-level isolation (separate service identities,
+restricted state ownership and brokered credentials), which is outside this bootstrap manager.
+
+The Node.js Gateway manager supports the Gateway's Node platforms, including Windows. The managed
+Python/Hermes installer in this release targets macOS and Linux; those SDKs still report versions on
+Windows, where process replacement remains a manual operator action for now.
 
 ## Node.js Gateway
 
@@ -34,10 +41,14 @@ atalk-gateway manager start
 ```
 
 The manager resolves only `@atalk/gateway` at an exact npm version from the official HTTPS registry,
-verifies the registry integrity and signature/provenance audit, installs with lifecycle scripts
-disabled into an isolated version directory, and runs `doctor` before switching. It then restarts the
-Gateway and requires `/health` to report both `status: "ok"` and `connected: true`. If that fails, the
-active marker is restored and the last-known-good Gateway is relaunched.
+verifies registry integrity, the exact dependency graph, and provenance tied to the official release
+workflow/tag. It installs with lifecycle scripts disabled into an isolated version directory and runs
+a package/import self-test with package-manager networking disabled and network credentials removed
+before switching. That self-test configuration is not an OS network sandbox. The manager then
+launches the candidate and requires
+three `/health` probes from that exact process/version and agent identity, including a fresh sidecar
+bound to the process and per-launch identifier. If that probation fails, the still-current durable
+marker is retained and the last-known-good Gateway is relaunched.
 
 Useful operator commands:
 
@@ -49,7 +60,10 @@ atalk-gateway manager update
 
 The one-shot `update` command only downloads and verifies a candidate. It deliberately does not
 activate it while there is no supervising parent; `manager start` owns activation, health checking
-and rollback.
+and rollback. Under **Notify**, that explicit command creates a one-shot approval valid for 24 hours.
+Registry/staging failures back off for 5 minutes, 15 minutes, one hour and then six hours without
+stopping the current runtime. A candidate that fails health probation is quarantined by exact version
+until the operator restages it or a newer recommendation arrives. State is isolated per credential.
 
 ## Python SDK and Hermes
 
@@ -89,8 +103,11 @@ process; upgrading manager logic itself remains an explicit operator action, whi
 self-modifying control process without an independent rollback authority.
 
 Credentials, identity keys and runtime state stay outside every versioned installation. Activation
-tokens are stripped from installer and child environments. Update failures are administrative events
-only: they cannot interrupt the SDK's messaging path or enter an agent prompt.
+tokens are stripped from installer and child environments. Version checks and staging failures stay
+outside the SDK's messaging path and never enter an agent prompt. Activating a verified update
+necessarily restarts the connector briefly; messages remain encrypted and queued by aTalk while it is
+offline. A candidate that fails probation is quarantined and the supervisor restores the
+last-known-good connector.
 
 An automatic decision is accepted only from the currently supervised child (matching process and
 per-launch identifier) and from a server advisory no more than 12 hours old, with at most five minutes

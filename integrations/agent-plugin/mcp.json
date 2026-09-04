@@ -4,12 +4,13 @@
     "atalk": {
       "type": "stdio",
       "command": "npx",
-      "args": ["-y", "@atalk/mcp-server@0.1.0-alpha.13"],
+      "args": ["-y", "@atalk/mcp-server@0.1.0-alpha.14"],
       "env": {
         "ATALK_BASE_URL": "https://api.atalk.ar",
         "ATALK_CREDENTIAL_PATH": "${PLUGIN_DATA}/agent-credentials.json",
         "ATALK_ATTACHMENT_DIR": "${PLUGIN_DATA}/attachments",
-        "ATALK_ALLOWED_FILE_ROOTS": "${PLUGIN_DATA}"
+        "ATALK_ALLOWED_FILE_ROOTS": "${PLUGIN_DATA}",
+        "ATALK_UPDATE_STATUS_PATH": "${PLUGIN_DATA}/runtime-update.json"
       },
       "cwd": "${PLUGIN_DATA}"
     }

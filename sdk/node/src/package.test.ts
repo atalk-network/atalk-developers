@@ -142,7 +142,8 @@ describe("published Node SDK surface", () => {
     const activationToken = "activation-token-that-is-long-enough-for-the-api";
     const bodies: Array<Record<string, string>> = [];
     let committedResponse: Record<string, unknown> | undefined;
-    vi.stubGlobal("fetch", vi.fn(async (_url: string, init?: RequestInit) => {
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.endsWith("/v1/agent-runtime/check-in")) return new Response(null, { status: 404 });
       const body = JSON.parse(String(init?.body)) as Record<string, string>;
       bodies.push(body);
       committedResponse ??= {

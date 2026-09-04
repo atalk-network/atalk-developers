@@ -19,3 +19,24 @@ export {
   type GatewaySender,
 } from "./inbox.js";
 export { gatewayOpenApiDocument } from "./openapi.js";
+export {
+  MANAGED_GATEWAY_PACKAGE,
+  NodeRuntimeManager,
+  decideRuntimeUpdate,
+  defaultRuntimeManagerPaths,
+  parseRuntimeHealthReport,
+  verifyNpmAuditReport,
+  verifyNpmArtifactIntegrity,
+  type ActiveRuntimeMarker,
+  type ManagedRuntimeChild,
+  type NodeRuntimeManagerOptions,
+  type NpmRuntimeArtifact,
+  type RuntimeCandidateQuarantine,
+  type RuntimeHealthExpectation,
+  type RuntimeHealthReport,
+  type RuntimeManagerDependencies,
+  type RuntimeManagerPaths,
+  type RuntimeManagerSnapshot,
+  type RuntimeUpdateDecision,
+  type RuntimeUpdateResult,
+} from "./runtime-manager.js";

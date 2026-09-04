@@ -4,6 +4,31 @@ All notable public protocol and SDK changes are recorded here. The project follo
 
 ## Unreleased
 
+## 0.1.0-alpha.14 / 0.1.0a11 - 2026-09-04
+
+### Added
+
+- Node and Python runtimes now report SDK, integration, optional host, protocol version, release channel and
+  capabilities after connect and every six hours, and expose a validated structured update advisory
+  through status APIs, a callback and an atomic private status file without creating model turns.
+- The universal Gateway and Python stack include external Runtime Managers with notification, security-only and
+  compatible-update policies, isolated exact-version staging, integrity checks, self-test, atomic
+  activation, reconnect/health gating, process ownership, rollback and heartbeat concurrency leases.
+
+### Security
+
+- Runtime advisories can select only a newer exact version of the locally allowlisted official Gateway
+  package. Server-supplied commands, package identities, install flags and arbitrary artifact URLs are
+  never executed. Required checksum, registry signatures and SLSA provenance are verified with a clean
+  npm environment, a release-signed exact dependency allowlist prevents transitive drift, lifecycle scripts
+  stay disabled, and the offline self-test receives no production credential.
+- Update check-ins are bounded and asynchronous, remain compatible with older relays, and cannot block
+  authenticated messaging startup or enter agent context. A bounded built-in 401 refresh/retry supports
+  sockets that outlive access tokens without letting a custom credential hook poison normal authentication.
+- Managed updates bind pre-commit health and a fresh sidecar to the launched PID, launch id, integration
+  version and agent identity; failed exact versions are quarantined after rollback, and only expired
+  heartbeat leases are reclaimed. Manager state is namespaced per agent credential.
+
 ## 0.1.0-alpha.13 / 0.1.0a10 - 2026-09-04
 
 ### Changed

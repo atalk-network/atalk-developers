@@ -26,6 +26,25 @@ export type {
   WorkroomMandateUsage,
 } from "./runtime-state-store.js";
 export { RUST_CORE_VERSION } from "./native-core.js";
+export {
+  ATALK_PROTOCOL_VERSION,
+  ATALK_SDK_VERSION,
+  isManagedRuntimeProcess,
+  parseRuntimeUpdateAdvisory,
+  persistRuntimeUpdateStatus,
+  resolveRuntimeCheckIn,
+} from "./runtime-update.js";
+export type {
+  AgentRuntimeCheckIn,
+  AgentRuntimeOptions,
+  PersistedRuntimeUpdateStatus,
+  RuntimeComponentMetadata,
+  RuntimeReleaseChannel,
+  RuntimeUpdateAdvisory,
+  RuntimeUpdatePolicy,
+  RuntimeUpdateSeverity,
+  RuntimeUpdateStatus,
+} from "./runtime-update.js";
 export { defaultWorkroomAction, WorkroomClient, workroomStopReason } from "./workrooms.js";
 export type {
   DecryptedWorkroomEvent,

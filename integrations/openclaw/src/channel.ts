@@ -5,6 +5,8 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   Agent,
+  ATALK_SDK_VERSION,
+  isManagedRuntimeProcess,
   type AgentAttachmentFileInput,
   type DecryptedWorkroomEvent,
   type IncomingMessage,
@@ -457,6 +459,11 @@ const plugin: ChannelPlugin<ResolvedAtalkAccount> = {
       connected: activeAgents.get(account.accountId)?.connected ?? false,
       credentialSource: account.token ? "activation-token" : "credential-file",
       baseUrl: account.baseUrl,
+      runtime: {
+        sdkVersion: ATALK_SDK_VERSION,
+        integrationVersion: ATALK_SDK_VERSION,
+        advisory: activeAgents.get(account.accountId)?.runtimeUpdate ?? null,
+      },
     }),
   },
   setup: { applyAccountConfig: ({ cfg }) => cfg },
@@ -469,14 +476,53 @@ const plugin: ChannelPlugin<ResolvedAtalkAccount> = {
         ...(ctx.account.token ? { token: ctx.account.token } : {}),
         baseUrl: ctx.account.baseUrl,
         credentialPath: ctx.account.credentialPath,
+        runtime: {
+          integration: { name: "@atalk/openclaw", version: ATALK_SDK_VERSION },
+          capabilities: [
+            "e2ee", "text", "attachments", "directed-mentions", "supervision", "workrooms", "openclaw.channel",
+            ...(isManagedRuntimeProcess() ? ["runtime.auto-update"] : []),
+          ],
+          ...(process.env.ATALK_UPDATE_STATUS_PATH
+            ? { updateStatusPath: process.env.ATALK_UPDATE_STATUS_PATH }
+            : {}),
+        },
       });
       activeAgents.set(ctx.accountId, agent);
       agent.on("error", (error) => ctx.log?.error(error.message));
+      agent.on("update", (advisory) => {
+        ctx.setStatus({
+          ...ctx.getStatus(),
+          profile: {
+            atalkRuntime: {
+              sdkVersion: ATALK_SDK_VERSION,
+              status: advisory.status,
+              recommendedVersion: advisory.recommendedVersion ?? null,
+            },
+          },
+        });
+        if (advisory.status === "UPDATE_AVAILABLE" || advisory.status === "UPDATE_REQUIRED") {
+          const recommended = advisory.recommendedVersion ? ` ${advisory.recommendedVersion}` : "";
+          ctx.log?.warn(`aTalk ${advisory.status.toLowerCase().replaceAll("_", " ")}:${recommended}${advisory.releaseNotesUrl ? ` (${advisory.releaseNotesUrl})` : ""}`);
+        }
+      });
       agent.on("message", (message) => dispatchIncoming(ctx.cfg, ctx.account, agent, message));
       try {
         await agent.start();
         const workroomPolling = pollWorkrooms(ctx.cfg, ctx.account, agent, ctx.abortSignal, ctx.log);
-        ctx.setStatus({ ...ctx.getStatus(), accountId: ctx.accountId, running: true, connected: true, lastConnectedAt: Date.now() });
+        ctx.setStatus({
+          ...ctx.getStatus(),
+          accountId: ctx.accountId,
+          running: true,
+          connected: true,
+          lastConnectedAt: Date.now(),
+          profile: {
+            atalkRuntime: {
+              sdkVersion: ATALK_SDK_VERSION,
+              status: agent.runtimeUpdate?.status ?? "UNKNOWN",
+              recommendedVersion: agent.runtimeUpdate?.recommendedVersion ?? null,
+            },
+          },
+        });
         ctx.log?.info(`connected as ${agent.peer?.handle ?? "unknown"}`);
         await new Promise<void>((resolve) => ctx.abortSignal.addEventListener("abort", () => resolve(), { once: true }));
         await workroomPolling;

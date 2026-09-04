@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "root": {
+    "name": "@atalk/gateway",
+    "version": "0.1.0-alpha.14"
+  },
+  "packages": {
+    "@atalk/gateway": "0.1.0-alpha.14",
+    "@atalk/sdk": "0.1.0-alpha.14",
+    "@atalk/core-native": "0.1.0-alpha.14",
+    "@atalk/protocol": "0.1.0-alpha.14",
+    "@atalk/core-native-darwin-arm64": "0.1.0-alpha.14",
+    "@atalk/core-native-darwin-x64": "0.1.0-alpha.14",
+    "@atalk/core-native-linux-arm64-gnu": "0.1.0-alpha.14",
+    "@atalk/core-native-linux-arm64-musl": "0.1.0-alpha.14",
+    "@atalk/core-native-linux-x64-gnu": "0.1.0-alpha.14",
+    "@atalk/core-native-linux-x64-musl": "0.1.0-alpha.14",
+    "@atalk/core-native-win32-arm64-msvc": "0.1.0-alpha.14",
+    "@atalk/core-native-win32-x64-msvc": "0.1.0-alpha.14",
+    "proper-lockfile": "4.1.2",
+    "graceful-fs": "4.2.11",
+    "retry": "0.12.0",
+    "signal-exit": "3.0.7",
+    "tweetnacl": "1.0.3",
+    "ws": "8.21.3",
+    "zod": "4.4.3"
+  },
+  "required": [
+    "@atalk/gateway",
+    "@atalk/sdk",
+    "@atalk/core-native",
+    "@atalk/protocol",
+    "proper-lockfile",
+    "graceful-fs",
+    "retry",
+    "signal-exit",
+    "tweetnacl",
+    "ws",
+    "zod"
+  ]
+}

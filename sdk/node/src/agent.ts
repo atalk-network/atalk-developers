@@ -36,11 +36,22 @@ import {
   type AgentRuntimeState,
   type RuntimeStateStore,
 } from "./runtime-state-store.js";
+import {
+  parseRuntimeUpdateAdvisory,
+  persistRuntimeUpdateStatus,
+  resolveRuntimeCheckIn,
+  type AgentRuntimeCheckIn,
+  type AgentRuntimeOptions,
+  type RuntimeUpdateAdvisory,
+} from "./runtime-update.js";
 import { WorkroomClient } from "./workrooms.js";
 
 const MAX_PROCESSED_INCOMING = 10_000;
 const DEFAULT_REFRESH_LEEWAY_MS = 5 * 60_000;
 const HEARTBEAT_INTERVAL_MS = 25_000;
+const RUNTIME_CHECK_IN_INTERVAL_MS = 6 * 60 * 60_000;
+const RUNTIME_CHECK_IN_JITTER = 0.1;
+const RUNTIME_CHECK_IN_TIMEOUT_MS = 5_000;
 const FATAL_SESSION_CODES = new Set([
   "AUTH_REQUIRED",
   "INVALID_REFRESH_TOKEN",
@@ -60,6 +71,8 @@ export interface AgentOptions {
   refreshCredentials?: CredentialRefresher;
   refreshLeewayMs?: number;
   supervision?: boolean;
+  /** Version/capability metadata reported without exposing it to model turns. */
+  runtime?: AgentRuntimeOptions;
 }
 
 export interface IncomingMessage {
@@ -128,6 +141,7 @@ export interface SentMessage {
 
 type MessageHandler = (message: IncomingMessage) => void | Promise<void>;
 type ErrorHandler = (error: Error) => void;
+type RuntimeUpdateHandler = (advisory: RuntimeUpdateAdvisory) => void | Promise<void>;
 
 export class Agent {
   /** Durable, E2EE task/workroom API for this agent identity. */
@@ -140,6 +154,9 @@ export class Agent {
   private readonly usesDefaultCredentialRefresher: boolean;
   private readonly refreshLeewayMs: number;
   private readonly supervisionEnabled: boolean;
+  private readonly runtimeCheckIn: AgentRuntimeCheckIn;
+  private readonly updateStatusPath: string | undefined;
+  private readonly runtimeCheckInTimeoutMs: number;
   private credentials?: AgentCredentials;
   private runtimeState: AgentRuntimeState = emptyRuntimeState();
   private stateMutation: Promise<void> = Promise.resolve();
@@ -148,6 +165,8 @@ export class Agent {
   private inboxDrain: Promise<void> | undefined;
   private inboxRetryTimer: NodeJS.Timeout | undefined;
   private heartbeatTimer: NodeJS.Timeout | undefined;
+  private runtimeCheckInTimer: NodeJS.Timeout | undefined;
+  private runtimeCheckInPromise: Promise<void> | undefined;
   private reconnectTimer: NodeJS.Timeout | undefined;
   private inboxRetryAttempt = 0;
   private readonly sentThisConnection = new Set<string>();
@@ -157,6 +176,8 @@ export class Agent {
   private stopped = false;
   private messageHandler?: MessageHandler;
   private errorHandler?: ErrorHandler;
+  private runtimeUpdateHandler?: RuntimeUpdateHandler;
+  private latestRuntimeUpdate?: RuntimeUpdateAdvisory;
   private supervisors: PublicPeer[] = [];
   private readonly counterparties = new Map<string, PublicPeer>();
   private readonly processingIncoming = new Map<string, Promise<void>>();
@@ -175,6 +196,14 @@ export class Agent {
     this.credentialRefresher = options.refreshCredentials ?? refreshAtalkCredentials;
     this.refreshLeewayMs = Math.max(0, options.refreshLeewayMs ?? DEFAULT_REFRESH_LEEWAY_MS);
     this.supervisionEnabled = options.supervision ?? true;
+    this.runtimeCheckIn = resolveRuntimeCheckIn(options.runtime);
+    this.updateStatusPath = options.runtime?.updateStatusPath === false
+      ? undefined
+      : options.runtime?.updateStatusPath
+        ?? (this.credentialStore instanceof FileCredentialStore
+          ? `${this.credentialStore.path}.update.json`
+          : undefined);
+    this.runtimeCheckInTimeoutMs = Math.max(1, options.runtime?.checkInTimeoutMs ?? RUNTIME_CHECK_IN_TIMEOUT_MS);
     this.workrooms = new WorkroomClient({
       request: <T>(path: string, init?: RequestInit) => this.request<T>(path, init),
       credentials: () => this.requireCredentials(),
@@ -195,17 +224,34 @@ export class Agent {
     return this.credentials?.peer;
   }
 
+  get runtimeMetadata(): AgentRuntimeCheckIn {
+    return structuredClone(this.runtimeCheckIn);
+  }
+
+  get runtimeUpdate(): RuntimeUpdateAdvisory | undefined {
+    return this.latestRuntimeUpdate ? { ...this.latestRuntimeUpdate } : undefined;
+  }
+
+  /** Refresh advisory metadata without placing anything into the model message stream. */
+  async checkForRuntimeUpdate(): Promise<RuntimeUpdateAdvisory | undefined> {
+    await this.checkInRuntimeSafely();
+    return this.runtimeUpdate;
+  }
+
   on(event: "message", handler: MessageHandler): this;
   on(event: "error", handler: ErrorHandler): this;
-  on(event: "message" | "error", handler: MessageHandler | ErrorHandler): this {
+  on(event: "update", handler: RuntimeUpdateHandler): this;
+  on(event: "message" | "error" | "update", handler: MessageHandler | ErrorHandler | RuntimeUpdateHandler): this {
     if (event === "message") this.messageHandler = handler as MessageHandler;
-    else this.errorHandler = handler as ErrorHandler;
+    else if (event === "error") this.errorHandler = handler as ErrorHandler;
+    else this.runtimeUpdateHandler = handler as RuntimeUpdateHandler;
     return this;
   }
 
   async start(): Promise<void> {
     this.stopped = false;
     this.stopHeartbeat();
+    this.stopRuntimeCheckIns();
     this.clearReconnectTimer();
     this.inboxRetryAttempt = 0;
     this.runtimeState = (await this.runtimeStateStore.load()) ?? emptyRuntimeState();
@@ -233,6 +279,7 @@ export class Agent {
     this.ready = false;
     this.reconnectAttempt = 0;
     this.stopHeartbeat();
+    this.stopRuntimeCheckIns();
     this.clearReconnectTimer();
     if (this.inboxRetryTimer) clearTimeout(this.inboxRetryTimer);
     this.inboxRetryTimer = undefined;
@@ -374,6 +421,10 @@ export class Agent {
       this.supervisors = result.supervisors;
     }
     await this.connectWithRefresh();
+    // Advisory infrastructure must never extend or block the authenticated
+    // messaging startup path. The request is also bounded independently.
+    void this.checkInRuntimeSafely();
+    this.scheduleRuntimeCheckIn();
   }
 
   private async connect(): Promise<void> {
@@ -475,6 +526,96 @@ export class Agent {
   private stopHeartbeat(): void {
     if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
     this.heartbeatTimer = undefined;
+  }
+
+  private scheduleRuntimeCheckIn(): void {
+    this.stopRuntimeCheckIns();
+    if (this.stopped) return;
+    const jitter = 1 - RUNTIME_CHECK_IN_JITTER + Math.random() * RUNTIME_CHECK_IN_JITTER * 2;
+    this.runtimeCheckInTimer = setTimeout(() => {
+      this.runtimeCheckInTimer = undefined;
+      void this.checkInRuntimeSafely().finally(() => this.scheduleRuntimeCheckIn());
+    }, Math.round(RUNTIME_CHECK_IN_INTERVAL_MS * jitter));
+    this.runtimeCheckInTimer.unref();
+  }
+
+  private stopRuntimeCheckIns(): void {
+    if (this.runtimeCheckInTimer) clearTimeout(this.runtimeCheckInTimer);
+    this.runtimeCheckInTimer = undefined;
+  }
+
+  private async checkInRuntimeSafely(): Promise<void> {
+    if (this.runtimeCheckInPromise) return this.runtimeCheckInPromise;
+    const check = (async () => {
+      try {
+        const response = await this.fetchRuntimeCheckIn({
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(this.runtimeCheckIn),
+          signal: AbortSignal.timeout(this.runtimeCheckInTimeoutMs),
+        });
+        // Older and self-hosted relays may not implement runtime advisories yet.
+        if (response.status === 404) return;
+        if (!response.ok) throw await responseError(response);
+        const body = await response.json() as { advisory?: unknown };
+        const advisory = parseRuntimeUpdateAdvisory(body.advisory);
+        if (!advisory) throw new Error("INVALID_RUNTIME_ADVISORY: aTalk returned malformed update metadata");
+        const changed = !sameRuntimeAdvisory(this.latestRuntimeUpdate, advisory);
+        this.latestRuntimeUpdate = advisory;
+        if (this.updateStatusPath) {
+          await persistRuntimeUpdateStatus(this.updateStatusPath, this.runtimeCheckIn, advisory);
+        }
+        if (changed && this.runtimeUpdateHandler) {
+          this.notifyRuntimeUpdate(this.runtimeUpdateHandler, advisory);
+        }
+      } catch (error) {
+        // Runtime metadata is advisory and must never make message delivery fail.
+        this.reportRuntimeAdvisoryError(error);
+      }
+    })();
+    this.runtimeCheckInPromise = check;
+    try {
+      await check;
+    } finally {
+      if (this.runtimeCheckInPromise === check) this.runtimeCheckInPromise = undefined;
+    }
+  }
+
+  private notifyRuntimeUpdate(handler: RuntimeUpdateHandler, advisory: RuntimeUpdateAdvisory): void {
+    queueMicrotask(() => {
+      try {
+        void Promise.resolve(handler({ ...advisory })).catch((error: unknown) => this.reportRuntimeAdvisoryError(error));
+      } catch (error) {
+        this.reportRuntimeAdvisoryError(error);
+      }
+    });
+  }
+
+  private reportRuntimeAdvisoryError(error: unknown): void {
+    try {
+      this.errorHandler?.(error instanceof Error ? error : new Error(String(error)));
+    } catch {
+      // Advisory hooks are observability-only and cannot destabilize delivery.
+    }
+  }
+
+  private async fetchRuntimeCheckIn(init: RequestInit, retry = true): Promise<Response> {
+    // The socket has already authenticated (and startup refreshed credentials
+    // when necessary). Do not enter the shared refresh path here: a custom or
+    // stalled refresher must not defeat the advisory request deadline. A 401
+    // gets one bounded refresh/retry because the socket may outlive its access token.
+    const response = await fetch(`${this.baseUrl}/v1/agent-runtime/check-in`, {
+      ...init,
+      headers: {
+        authorization: `Bearer ${accessToken(this.requireCredentials())}`,
+        ...init.headers,
+      },
+    });
+    if (response.status === 401 && retry && this.usesDefaultCredentialRefresher
+      && await this.refreshCredentialsIfNeeded("UNAUTHORIZED", true, init.signal ?? undefined)) {
+      return this.fetchRuntimeCheckIn(init, false);
+    }
+    return response;
   }
 
   private clearReconnectTimer(): void {
@@ -1045,6 +1186,7 @@ export class Agent {
   private async refreshCredentialsIfNeeded(
     reason: "EXPIRING" | "UNAUTHORIZED",
     force = false,
+    signal?: AbortSignal,
   ): Promise<boolean> {
     if (!this.credentialRefresher || !this.credentials) return false;
     if (reason === "EXPIRING" && !force) {
@@ -1053,7 +1195,7 @@ export class Agent {
         : Number.POSITIVE_INFINITY;
       if (!Number.isFinite(expiresAt) || expiresAt > Date.now() + this.refreshLeewayMs) return false;
     }
-    if (this.refreshPromise) return this.refreshPromise;
+    if (this.refreshPromise) return awaitWithAbortSignal(this.refreshPromise, signal);
     const refresh = (async () => {
       let current = this.requireCredentials();
       if (this.usesDefaultCredentialRefresher && current.refreshToken && !current.refreshRequestId) {
@@ -1066,7 +1208,12 @@ export class Agent {
       }
       let refreshed: Awaited<ReturnType<CredentialRefresher>>;
       try {
-        refreshed = await this.credentialRefresher!({ credentials: current, reason, baseUrl: this.baseUrl });
+        refreshed = await this.credentialRefresher!({
+          credentials: current,
+          reason,
+          baseUrl: this.baseUrl,
+          ...(signal ? { signal } : {}),
+        });
       } catch (error) {
         if (this.usesDefaultCredentialRefresher && current.refreshRequestId && isSessionError(error)) {
           const { refreshRequestId: _failedRefreshRequest, ...restored } = current;
@@ -1095,11 +1242,12 @@ export class Agent {
       return true;
     })();
     this.refreshPromise = refresh;
-    try {
-      return await refresh;
-    } finally {
+    void refresh.then(() => {
       if (this.refreshPromise === refresh) this.refreshPromise = undefined;
-    }
+    }, () => {
+      if (this.refreshPromise === refresh) this.refreshPromise = undefined;
+    });
+    return await awaitWithAbortSignal(refresh, signal);
   }
 
   private async connectWithRefresh(): Promise<void> {
@@ -1176,6 +1324,20 @@ function accessToken(credentials: AgentCredentials): string {
   return credentials.accessToken ?? credentials.sessionToken;
 }
 
+function sameRuntimeAdvisory(
+  left: RuntimeUpdateAdvisory | undefined,
+  right: RuntimeUpdateAdvisory,
+): boolean {
+  return Boolean(left
+    && left.status === right.status
+    && left.currentVersion === right.currentVersion
+    && left.recommendedVersion === right.recommendedVersion
+    && left.minimumVersion === right.minimumVersion
+    && left.severity === right.severity
+    && left.releaseNotesUrl === right.releaseNotesUrl
+    && left.policy === right.policy);
+}
+
 async function refreshAtalkCredentials(
   context: Parameters<CredentialRefresher>[0],
 ): ReturnType<CredentialRefresher> {
@@ -1191,6 +1353,7 @@ async function refreshAtalkCredentials(
       requestId: context.credentials.refreshRequestId
         ?? deterministicUuid(`atalk-agent-refresh:${refreshToken}`),
     }),
+    ...(context.signal ? { signal: context.signal } : {}),
   });
   if (!response.ok) throw await responseError(response);
   const body = await response.json() as {
@@ -1209,6 +1372,16 @@ async function refreshAtalkCredentials(
       ? { accessTokenExpiresAt: body.accessTokenExpiresAt ?? body.expiresAt }
       : {}),
   };
+}
+
+async function awaitWithAbortSignal<T>(promise: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+  if (!signal) return promise;
+  if (signal.aborted) throw signal.reason;
+  return new Promise<T>((resolvePromise, rejectPromise) => {
+    const aborted = () => rejectPromise(signal.reason);
+    signal.addEventListener("abort", aborted, { once: true });
+    void promise.then(resolvePromise, rejectPromise).finally(() => signal.removeEventListener("abort", aborted));
+  });
 }
 
 function isSessionError(error: unknown): boolean {

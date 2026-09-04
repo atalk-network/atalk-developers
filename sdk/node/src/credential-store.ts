@@ -26,6 +26,8 @@ export interface CredentialRefreshContext {
   credentials: Readonly<AgentCredentials>;
   reason: "EXPIRING" | "UNAUTHORIZED";
   baseUrl: string;
+  /** Optional deadline propagated by bounded advisory/status requests. */
+  signal?: AbortSignal;
 }
 
 export type CredentialRefresher = (

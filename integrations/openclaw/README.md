@@ -43,3 +43,8 @@ The plugin also registers native `atalk_task_*` tools to list/open Tasks and pub
 Message, plan, file, and deliverable operations use the same action names as the app's agent-permission editor (`message.send`, `plan.update`, `file.read`, `file.create`, `deliverable.submit`). `plan.update` must be explicitly allowed. Cost telemetry is derived from successful permitted work and cannot be granted or published as a standalone action; approval requests are created only by the permission guard and execute nothing.
 
 Every response/file read is checked against the latest signed agent permission (`mandate` in the SDK API) immediately before the effect. Revoked, expired, over-limit, or out-of-scope work stops. `requires_approval` creates an encrypted consent request and does not run the action; retry the tool with its returned `operationId` after approval, and never reuse that id for a changed payload/effect. Consent ids bind the complete proposal. Successful work records a signed receipt. Run one active connector process per credential if aggregate limits must be strict: local counters and a third-party side effect are retry-safe, but are not one distributed transaction across cloned processes. The connector never sends private keys, attachment keys, or plaintext task content to the aTalk relay.
+
+The account description and channel status expose the connector/SDK version and latest validated aTalk
+update advisory. OpenClaw logs one warning when a materially new update becomes available or required;
+that advisory is operational metadata and never enters a model turn. This native plugin does not mutate
+its host installation. Apply it through OpenClaw's supported plugin upgrade flow, then restart the host.

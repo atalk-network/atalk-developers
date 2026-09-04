@@ -1,4 +1,6 @@
+import { execFileSync } from "node:child_process";
 import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 
 const release = process.argv[2];
 const tag = process.argv[3];
@@ -26,6 +28,84 @@ if (release === "node") {
     if (manifest.version !== expected) {
       throw new Error(`${manifest.name} is ${manifest.version}, expected ${expected} from ${tag}`);
     }
+  }
+
+  const sdkRuntime = await readFile("sdk/node/src/runtime-update.ts", "utf8");
+  const exportedSdkVersion = /export const ATALK_SDK_VERSION = "([^"]+)"/u.exec(sdkRuntime)?.[1];
+  if (exportedSdkVersion !== expected) {
+    throw new Error(`ATALK_SDK_VERSION is ${exportedSdkVersion ?? "missing"}, expected ${expected} from ${tag}`);
+  }
+
+  const plugin = await readJson("integrations/agent-plugin/plugin.json");
+  if (plugin.version !== expected) {
+    throw new Error(`agent plugin is ${plugin.version ?? "missing"}, expected ${expected} from ${tag}`);
+  }
+  const runtimeLock = await readJson("integrations/gateway/runtime-dependency-lock.json");
+  if (runtimeLock?.version !== 1 || runtimeLock?.root?.name !== "@atalk/gateway"
+    || runtimeLock.root.version !== expected || !runtimeLock.packages || !Array.isArray(runtimeLock.required)) {
+    throw new Error(`Gateway runtime dependency lock does not describe @atalk/gateway@${expected}`);
+  }
+  for (const [name, version] of Object.entries(runtimeLock.packages)) {
+    if (name.startsWith("@atalk/") && version !== expected) {
+      throw new Error(`Gateway runtime dependency lock pins ${name}@${version}, expected ${expected}`);
+    }
+  }
+  if (!runtimeLock.required.includes("@atalk/gateway")) {
+    throw new Error("Gateway runtime dependency lock must require the root Gateway package");
+  }
+  const listed = JSON.parse(execFileSync("pnpm", [
+    "--filter", "@atalk/gateway", "list", "--prod", "--depth", "Infinity", "--json",
+  ], { encoding: "utf8" }));
+  const root = listed[0];
+  if (!root || root.name !== "@atalk/gateway" || root.version !== expected) {
+    throw new Error("Could not resolve the Gateway production dependency graph");
+  }
+  const observed = new Map([[root.name, root.version]]);
+  const visit = async (name, dependency) => {
+    const version = String(dependency.version).startsWith("link:")
+      ? (await readJson(join(dependency.path, "package.json"))).version
+      : dependency.version;
+    if (typeof version !== "string") throw new Error(`Could not resolve runtime dependency ${name}`);
+    const previous = observed.get(name);
+    if (previous && previous !== version) {
+      throw new Error(`Runtime graph contains multiple versions of ${name}: ${previous}, ${version}`);
+    }
+    observed.set(name, version);
+    for (const [childName, child] of Object.entries(dependency.dependencies ?? {})) {
+      await visit(childName, child);
+    }
+  };
+  for (const [name, dependency] of Object.entries(root.dependencies ?? {})) await visit(name, dependency);
+  for (const [name, version] of observed) {
+    if (runtimeLock.packages[name] !== version) {
+      throw new Error(`Gateway runtime dependency lock pins ${name}@${runtimeLock.packages[name] ?? "missing"}, resolved ${version}`);
+    }
+  }
+  const required = new Set(runtimeLock.required);
+  if (required.size !== observed.size || [...observed.keys()].some((name) => !required.has(name))) {
+    throw new Error("Gateway runtime dependency lock required set does not match the resolved production graph");
+  }
+  for (const name of Object.keys(runtimeLock.packages)) {
+    if (!observed.has(name) && !name.startsWith("@atalk/core-native-")) {
+      throw new Error(`Gateway runtime dependency lock contains unexpected optional package ${name}`);
+    }
+  }
+  const pluginMcp = await readJson("integrations/agent-plugin/mcp.json");
+  const mcpArguments = pluginMcp?.mcpServers?.atalk?.args;
+  const pinnedMcp = Array.isArray(mcpArguments)
+    ? mcpArguments.find((value) => String(value).startsWith("@atalk/mcp-server@"))
+    : undefined;
+  if (pinnedMcp !== `@atalk/mcp-server@${expected}`) {
+    throw new Error(`agent plugin MCP pin is ${pinnedMcp ?? "missing"}, expected @atalk/mcp-server@${expected}`);
+  }
+
+  const nativeLoader = await readFile("core/node-native/index.js", "utf8");
+  const nativeExpectedVersions = new Set(
+    [...nativeLoader.matchAll(/binding package version mismatch, expected ([^ ]+) but got/gu)]
+      .map((match) => match[1]),
+  );
+  if (nativeExpectedVersions.size !== 1 || !nativeExpectedVersions.has(expected)) {
+    throw new Error(`native loader expects ${[...nativeExpectedVersions].join(", ") || "no version"}, expected ${expected}`);
   }
   console.log(`Verified coordinated Node release ${expected}`);
 } else if (release === "python") {

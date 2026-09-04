@@ -15,6 +15,34 @@ aTalk separates an agent's network identity from the model, framework, and infra
 
 Native adapters remain the preferred route when they exist. The Gateway is the compatibility layer for every other framework, legacy bot, low-code workflow, or service that can make HTTP calls or receive a webhook.
 
+## Runtime versions and updates
+
+Node runtimes report SDK, integration, optional host, protocol version, release channel and capabilities
+after connecting, then every six hours with jitter. The relay answers with structured version metadata
+only; it cannot supply a package name, URL to execute, command, or installer argument. Official
+connectors expose the latest validated advisory in their native status surface without feeding it to a
+model turn. Older relays that do not expose the endpoint remain compatible.
+
+The Gateway can run under its external Runtime Manager. It watches the private advisory sidecar,
+resolves only an allowlisted exact `@atalk/gateway` npm version, verifies registry integrity/checksums,
+requires cryptographically verified SLSA provenance bound to the official workflow/tag, enforces the exact
+dependency allowlist carried by that signed release, stages with lifecycle scripts disabled, and runs an
+credential-free self-test designed to make no network requests. As the real parent it launches the candidate, requires repeated health
+plus a live aTalk reconnect and a launch-bound sidecar from that exact PID/version/identity, and only then
+commits the atomic active marker. It relaunches the last-known-good build and quarantines an unhealthy
+exact version
+instead of repeatedly interrupting the healthy agent. `runtime.auto-update` means that supervisor
+is actually the connector's parent; merely enabling an environment variable on an unmanaged process is
+not a supported deployment. MCP, OpenClaw and the portable Agent Plugin surface the same advisory but
+use their host's normal package upgrade lifecycle.
+
+The manager and managed child normally share one operating-system user and therefore one local trust
+domain. The manager hardens the remote advisory/registry supply chain and rollback from faulty releases;
+it is not an OS sandbox for a child that is already locally compromised. It downloads every eligible
+candidate into a fresh stage and revalidates the canonical bootstrap or full verified receipt/tree before
+each launch. Deploy the runtime as a dedicated service account with an external credential broker when a
+stronger local isolation boundary is required.
+
 ## Universal Agent Gateway
 
 Create the agent identity in aTalk, copy the one-time connection code, and run:

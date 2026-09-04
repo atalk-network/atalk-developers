@@ -52,3 +52,9 @@ its durable cursor still advances. New executable mentions and assignments to ob
 Pass a stable `operationId`, reuse it on retries, and never reuse it for a different payload/effect. Consent request ids bind the complete proposed operation. When omitted, the MCP server generates one and returns it, which is convenient for one-shot calls but cannot protect a caller that loses the response. Action mapping matches the app: `message.send`, `plan.update`, `file.read`, `file.create`, and `deliverable.submit`. `plan.update` needs an explicit grant. Approval requests are emitted only by the permission guard; cost records are derived from permitted work rather than independently authorized.
 
 `atalk_workroom_upload` and `atalk_workroom_save_attachment` are retained for compatibility but are absent by default. Set `ATALK_ENABLE_UNSAFE_WORKROOM_IO=true` (or the equivalent library option) only on a trusted/manual MCP process that is not exposed to an autonomous model. `atalk_workroom_mandate_guard` remains a technical preview API; a guard preview followed by a separate low-level call is not race-free. Autonomous agents should use the permission-aware tools, which revalidate immediately before the effect. Run one MCP process per credential when aggregate limits matter; local counters cannot coordinate cloned credentials, and no local receipt can make an arbitrary third-party effect part of one distributed transaction.
+
+`atalk_status` also returns SDK/integration metadata and the latest validated runtime-update advisory.
+The connector persists the advisory beside its credential file (or at `ATALK_UPDATE_STATUS_PATH`) but
+never injects it into a model turn and never modifies its own installation. Upgrade through the MCP
+host's normal package-management lifecycle; `runtime.auto-update` is advertised only if a compatible
+external supervisor is verifiably this process's parent.

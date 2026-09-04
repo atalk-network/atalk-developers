@@ -5,7 +5,14 @@ import { createServer, type IncomingMessage as HttpRequest, type Server, type Se
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { Agent, type IncomingMessage, type SentMessage, type WorkroomDetail } from "@atalk/sdk";
+import {
+  Agent,
+  ATALK_SDK_VERSION,
+  isManagedRuntimeProcess,
+  type IncomingMessage,
+  type SentMessage,
+  type WorkroomDetail,
+} from "@atalk/sdk";
 import { GATEWAY_SPEC, MAX_ATTACHMENT_BYTES } from "./constants.js";
 import {
   FileGatewayInboxStore,
@@ -44,6 +51,10 @@ export interface AtalkGatewayOptions {
   inboxCapacity?: number;
   inboxPath?: string;
   inboxStore?: GatewayInboxStore;
+  /** Advisory handoff file read by the external Runtime Manager. */
+  runtimeUpdateStatusPath?: string | false;
+  /** True only when the gateway process is owned by the aTalk Runtime Manager. */
+  managedRuntime?: boolean;
   agent?: Agent;
   logger?: GatewayLogger;
   fetch?: typeof fetch;
@@ -278,6 +289,16 @@ class GatewayRuntime implements AtalkGatewayRuntime {
       ...(options.token ? { token: options.token } : {}),
       baseUrl: options.baseUrl ?? "https://api.atalk.ar",
       ...(options.credentialPath ? { credentialPath: options.credentialPath } : {}),
+      runtime: {
+        integration: { name: "@atalk/gateway", version: ATALK_SDK_VERSION },
+        capabilities: [
+          "e2ee", "text", "attachments", "directed-mentions", "supervision", "workrooms", "gateway.http",
+          ...(options.managedRuntime === true && isManagedRuntimeProcess() ? ["runtime.auto-update"] : []),
+        ],
+        ...(options.runtimeUpdateStatusPath !== undefined
+          ? { updateStatusPath: options.runtimeUpdateStatusPath }
+          : {}),
+      },
     });
     const inboxStore = options.inboxStore
       ?? (options.inboxPath
@@ -376,6 +397,11 @@ class GatewayRuntime implements AtalkGatewayRuntime {
           type: this.agent.peer.type,
         } : null,
         queuedEvents: this.inbox.pending,
+        runtime: canInspect ? {
+          metadata: this.agent.runtimeMetadata,
+          advisory: this.agent.runtimeUpdate ?? null,
+          processId: process.pid,
+        } : undefined,
       });
       return;
     }
@@ -399,6 +425,10 @@ class GatewayRuntime implements AtalkGatewayRuntime {
           "workroom-mandated-publication", "workroom-attachments",
         ],
         limits: { attachmentBytes: MAX_ATTACHMENT_BYTES, textCharacters: 32_000 },
+        runtime: {
+          metadata: this.agent.runtimeMetadata,
+          advisory: this.agent.runtimeUpdate ?? null,
+        },
         endpoints: {
           health: "/health",
           capabilities: "/v1/capabilities",

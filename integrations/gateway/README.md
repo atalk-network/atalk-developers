@@ -34,6 +34,66 @@ curl http://127.0.0.1:8788/v1/capabilities
 Runtime installers can also discover the same contract at `/.well-known/atalk-agent-gateway`.
 An OpenAPI 3.1 document is served at `/openapi.json`, so frameworks can generate a typed client or import the gateway as an HTTP tool without a custom aTalk adapter.
 
+## Safe managed updates
+
+For a long-lived gateway, start the external Runtime Manager instead of starting the gateway child
+directly:
+
+```bash
+npx -y @atalk/gateway@next manager start
+```
+
+The manager is the parent of the gateway process. The SDK writes validated advisories to the private
+file beside its credential state; the manager watches that file and advertises `runtime.auto-update`
+only to a child it actually owns. Inspect without changing anything:
+
+```bash
+npx -y @atalk/gateway@next manager status
+npx -y @atalk/gateway@next manager update --dry-run
+```
+
+`COMPATIBLE` is the default local maximum, so the owner's aTalk policy is honored on the next signed-in
+SDK check-in without an extra manager flag.
+Use `--policy SECURITY` to permit only security advisories or `--policy NOTIFY` for notification only.
+The effective policy is always the more restrictive of the local maximum and the advisory policy.
+
+The manager accepts no server-supplied package name, URL, shell command or install flags. It resolves
+only the allowlisted `@atalk/gateway` package at one exact semantic version through npm, verifies npm
+Subresource Integrity plus the legacy checksum, checks registry signatures, requires cryptographically
+verified SLSA provenance bound to the official repository, release workflow and exact tag, and reads an
+exact dependency allowlist carried inside that signed tarball. It pins the complete permitted graph,
+installs with lifecycle scripts disabled into an isolated version directory, verifies the resulting lock,
+and runs a credential-free package/import self-test designed to make no network requests. It stops the old child,
+launches the candidate, and requires repeated HTTP health from that exact PID, integration version and
+agent identity, a live aTalk reconnect, and a launch-bound advisory sidecar before committing the atomic
+active marker. If the candidate fails, it relaunches the last-known-good previous version and quarantines that exact candidate
+so the healthy agent is not interrupted repeatedly. Credentials, inbox and advisory state remain outside
+version directories. Heartbeat leases prevent concurrent updates and supervisors and are reclaimed only
+after their stale interval; each managed child also has an IPC parent-death channel so a crashed manager
+cannot leave an orphan claiming update ownership.
+
+The manager and its child normally run as the same operating-system user and therefore share one local
+trust domain. These controls protect the remote advisory/registry supply chain, failed releases, and
+accidental local drift; they are not a sandbox against an already compromised local child that can write
+the manager's files. Every launch still revalidates a canonical packaged bootstrap or a complete verified
+receipt/tree, and every eligible candidate is downloaded into a fresh staging directory. Isolate the
+runtime under a dedicated service account and an external credential broker when the local process itself
+must be outside the manager's trust boundary.
+
+`manager update` is a manual fresh-stage-and-self-test command and never switches the active marker on its
+own. Under `NOTIFY` it records a 24-hour, one-version approval for one supervised attempt; when an exact
+version was quarantined, the command downloads and self-tests it afresh before allowing one more attempt.
+The supervised attempt also reconstructs the candidate from the verified registry artifact rather than
+trusting the earlier inactive directory.
+Registry/staging failures use a persisted 5-minute to 6-hour backoff per version, while a different advised
+version is eligible immediately. `manager start` is the normal production mode that owns activation,
+restart, health gating and rollback. Pair first: the manager refuses to start without a persisted credential
+file and strips the
+one-time `ATALK_AGENT_TOKEN` from every staged self-test and managed child. Manager state defaults to
+an agent-specific directory below `~/.atalk/runtime-manager/gateway/`; use `--state-dir` to move it without
+moving credentials. On POSIX the credential must be a bounded, non-symlink file owned by the current user
+with mode `0600`; on Windows use the SDK-created credential file under the user's ACL-protected profile.
+
 ## Receive and reply
 
 Long-poll for up to 25 seconds:

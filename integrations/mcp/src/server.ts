@@ -2,7 +2,14 @@ import { randomUUID } from "node:crypto";
 import { mkdir, realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, delimiter, isAbsolute, join, relative, resolve, sep } from "node:path";
-import { Agent, type DecryptedWorkroomEvent, type IncomingMessage, type WorkroomDetail } from "@atalk/sdk";
+import {
+  Agent,
+  ATALK_SDK_VERSION,
+  isManagedRuntimeProcess,
+  type DecryptedWorkroomEvent,
+  type IncomingMessage,
+  type WorkroomDetail,
+} from "@atalk/sdk";
 import { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import { AgentInbox, serializeMessage } from "./inbox.js";
@@ -98,6 +105,8 @@ export interface AtalkMcpOptions {
   allowWorkroomAudit?: boolean;
   /** Explicit trusted/manual opt-in for low-level Task attachment I/O. */
   allowUnsafeWorkroomIo?: boolean;
+  runtimeUpdateStatusPath?: string | false;
+  managedRuntime?: boolean;
   agent?: Agent;
 }
 
@@ -140,12 +149,25 @@ async function resolveAllowedFile(filePath: string, roots: string[]): Promise<{ 
 
 export function createAtalkMcpServer(options: AtalkMcpOptions = {}): AtalkMcpRuntime {
   const token = options.token ?? process.env.ATALK_AGENT_TOKEN;
+  const managedRuntime = isManagedRuntimeProcess() && options.managedRuntime !== false;
   const agent = options.agent ?? new Agent({
     ...(token ? { token } : {}),
     baseUrl: options.baseUrl ?? process.env.ATALK_BASE_URL ?? "https://api.atalk.ar",
     credentialPath: options.credentialPath
       ?? process.env.ATALK_CREDENTIAL_PATH
       ?? join(process.env.PLUGIN_DATA ?? join(homedir(), ".atalk"), "mcp-agent.json"),
+    runtime: {
+      integration: { name: "@atalk/mcp-server", version: ATALK_SDK_VERSION },
+      capabilities: [
+        "e2ee", "text", "attachments", "directed-mentions", "supervision", "workrooms", "mcp.tools",
+        ...(managedRuntime ? ["runtime.auto-update"] : []),
+      ],
+      ...(options.runtimeUpdateStatusPath !== undefined
+        ? { updateStatusPath: options.runtimeUpdateStatusPath }
+        : process.env.ATALK_UPDATE_STATUS_PATH
+          ? { updateStatusPath: process.env.ATALK_UPDATE_STATUS_PATH }
+          : {}),
+    },
   });
   const attachmentDirectory = resolve(
     options.attachmentDirectory
@@ -164,13 +186,18 @@ export function createAtalkMcpServer(options: AtalkMcpOptions = {}): AtalkMcpRun
   const allowUnsafeWorkroomIo = options.allowUnsafeWorkroomIo
     ?? environmentFlag(process.env.ATALK_ENABLE_UNSAFE_WORKROOM_IO);
   const inbox = new AgentInbox();
-  const server = new McpServer({ name: "atalk", version: "0.1.0-alpha.13" });
+  const server = new McpServer({ name: "atalk", version: ATALK_SDK_VERSION });
   agent.on("message", (message) => inbox.push(message));
   agent.on("error", (error) => console.error(`[aTalk] ${error.message}`));
 
   server.registerTool("atalk_status", {
     description: "Show the active aTalk identity, connection state, and queued message count.",
-  }, async () => textResult({ connected: agent.connected, peer: agent.peer ?? null, pendingMessages: inbox.pending }));
+  }, async () => textResult({
+    connected: agent.connected,
+    peer: agent.peer ?? null,
+    pendingMessages: inbox.pending,
+    runtime: { metadata: agent.runtimeMetadata, advisory: agent.runtimeUpdate ?? null },
+  }));
 
   server.registerTool("atalk_receive", {
     description: "Receive queued encrypted aTalk text and attachment metadata. Use atalk_download_attachment to inspect media bytes.",
