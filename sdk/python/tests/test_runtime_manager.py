@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import contextlib
 import io
 import json
 import hashlib
@@ -233,6 +234,32 @@ def test_parent_death_pipe_kills_managed_process_group(tmp_path):
             if time.monotonic() >= lock_deadline:
                 raise
             time.sleep(0.01)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="managed process replacement is POSIX-only")
+def test_watchdog_cleans_same_group_descendant_after_leader_exits(tmp_path):
+    descendant_path = tmp_path / "descendant-pid"
+    leader_code = (
+        "import subprocess,sys; from pathlib import Path; "
+        "child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)']); "
+        f"Path({str(descendant_path)!r}).write_text(str(child.pid))"
+    )
+    watched = _launch_with_parent_watchdog(
+        [sys.executable, "-c", leader_code],
+        cwd=tmp_path,
+        environment=os.environ.copy(),
+        shutdown_timeout_seconds=0.2,
+        lock_descriptor=None,
+    )
+    descendant_pid = None
+    try:
+        assert watched.wait(timeout=5) == 0
+        descendant_pid = int(descendant_path.read_text())
+        assert not _pid_exists(descendant_pid)
+    finally:
+        if descendant_pid and _pid_exists(descendant_pid):
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(descendant_pid, signal.SIGKILL)
 
 
 def test_stale_live_pid_is_never_signaled_or_duplicated(tmp_path):
@@ -560,6 +587,59 @@ def test_failed_candidate_restarts_previous_runtime_after_atomic_rollback(tmp_pa
     assert restarted_manager.update_deferment("0.1.0a12") is not None
     now[0] += 6 * 60 * 60 + 1
     assert restarted_manager.update_deferment("0.1.0a12") is None
+
+
+def test_candidate_pointer_is_committed_only_after_health(tmp_path):
+    manager = make_manager(tmp_path)
+    manager._prepare_private_directories()
+    previous = ManagedRelease("0.1.0a11", tmp_path / "old", tmp_path / "old" / "site")
+    candidate = ManagedRelease("0.1.0a12", tmp_path / "candidate", tmp_path / "candidate" / "site")
+    previous_process = FakeProcess()
+    candidate_process = FakeProcess()
+    manager._write_pointer(previous)
+    manager.stage = lambda _version: candidate
+    manager.stop_process = lambda process: setattr(process, "alive", False)
+    manager.launch = lambda _release: candidate_process
+
+    def health(_process):
+        transition = json.loads(manager.paths.state.read_text())
+        assert json.loads(manager.paths.pointer.read_text())["release"] == previous.version
+        assert transition["status"] == "SWITCHING"
+        assert transition["targetRelease"] == candidate.version
+        return True
+
+    manager.health_check = health
+    result = manager.reconcile(previous_process, previous, candidate.version)
+
+    assert result.updated is True
+    assert json.loads(manager.paths.pointer.read_text())["release"] == candidate.version
+
+
+def test_startup_recovers_and_quarantines_incomplete_switch(tmp_path):
+    manager = make_manager(tmp_path)
+    manager._prepare_private_directories()
+    previous = ManagedRelease(
+        "0.1.0a11", manager.paths.releases / "0.1.0a11", tmp_path / "unused",
+    )
+    candidate_version = "0.1.0a12"
+    previous.path.mkdir()
+    manager.verify = lambda release: None
+    manager._write_pointer(previous)
+    manager._write_state(
+        "SWITCHING", previous, 999_999,
+        detail=f"target={candidate_version}", target_release=candidate_version,
+    )
+
+    manager._recover_stale_runtime()
+
+    pointer = json.loads(manager.paths.pointer.read_text())
+    state = json.loads(manager.paths.state.read_text())
+    failure = manager.update_deferment(candidate_version, include_expired=True)
+    assert pointer["release"] == previous.version
+    assert state["status"] == "ROLLED_BACK"
+    assert failure is not None
+    assert failure.category == "CANDIDATE"
+    assert failure.quarantined is True
 
 
 def test_unhealthy_rollback_is_stopped_and_reported_as_failure(tmp_path):

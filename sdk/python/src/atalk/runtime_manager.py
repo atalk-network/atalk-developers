@@ -688,14 +688,19 @@ class RuntimeManager:
         if candidate.version == current.version:
             self._clear_update_failure(candidate.version)
             return ReconcileResult(process, current, updated=False, rolled_back=False)
-        self._write_state("SWITCHING", current, process.pid, detail=f"target={candidate.version}")
+        self._write_state(
+            "SWITCHING", current, process.pid,
+            detail=f"target={candidate.version}", target_release=candidate.version,
+        )
         self.stop_process(process)
         candidate_process: ManagedProcess | None = None
         try:
-            self._write_pointer(candidate)
             candidate_process = self.launch(candidate)
             if not self.health_check(candidate_process):
                 raise RuntimeManagerError(f"Candidate {candidate.version} failed health checks")
+            # The durable pointer is the commit record. Until candidate health
+            # succeeds, a crash must leave startup selecting the previous release.
+            self._write_pointer(candidate)
             self._clear_update_failure(candidate.version)
             self._write_state("RUNNING", candidate, candidate_process.pid, detail=f"updated_from={current.version}")
             return ReconcileResult(candidate_process, candidate, updated=True, rolled_back=False)
@@ -993,6 +998,33 @@ class RuntimeManager:
             value = _read_private_json(self.paths.state, MAX_STATUS_BYTES)
         except (FileNotFoundError, OSError, ValueError, json.JSONDecodeError):
             return
+        if value.get("status") == "SWITCHING":
+            previous_version = value.get("release")
+            target_version = value.get("targetRelease")
+            if not isinstance(previous_version, str) or not isinstance(target_version, str):
+                raise RuntimeManagerError("Incomplete runtime switch has an invalid transition journal")
+            try:
+                _validate_version(previous_version)
+                _validate_version(target_version)
+            except ValueError as error:
+                raise RuntimeManagerError("Incomplete runtime switch has an invalid transition journal") from error
+            # A target pointer can only be committed after the candidate passes
+            # health. Otherwise restore and quarantine before launching anything.
+            if self._load_pointer_version() != target_version:
+                previous = self._release_from_path(
+                    previous_version, self.paths.releases / previous_version,
+                )
+                self.verify(previous)
+                failure = self._record_update_failure(
+                    target_version, "CANDIDATE", "candidate_health_or_switch_failed",
+                )
+                self._write_pointer(previous)
+                self._write_state(
+                    "ROLLED_BACK", previous, None,
+                    detail=f"candidate={target_version}; error=interrupted_switch",
+                    update_failure=failure,
+                )
+                return
         process_id = value.get("pid")
         if (
             value.get("status") == "STOPPED"
@@ -1049,6 +1081,7 @@ class RuntimeManager:
         *,
         detail: str | None = None,
         update_failure: UpdateFailure | None = None,
+        target_release: str | None = None,
     ) -> None:
         _atomic_private_json(self.paths.state, {
             "version": 1,
@@ -1058,6 +1091,7 @@ class RuntimeManager:
             "updatedAt": _utc_timestamp_at(self._clock()),
             **({"detail": detail} if detail else {}),
             **({"update": update_failure.to_wire()} if update_failure else {}),
+            **({"targetRelease": target_release} if target_release else {}),
         })
 
 
@@ -1614,6 +1648,7 @@ def _watchdog_entry(keepalive_descriptor: int, config_descriptor: int, ready_des
     for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
         signal.signal(signum, request_stop)
     child: subprocess.Popen[bytes] | None = None
+    exit_observer: _ProcessExitObserver | None = None
     try:
         with os.fdopen(config_descriptor, "r", encoding="utf-8") as handle:
             config = json.load(handle)
@@ -1642,9 +1677,15 @@ def _watchdog_entry(keepalive_descriptor: int, config_descriptor: int, ready_des
             start_new_session=True,
             close_fds=True,
         )
+        exit_observer = _ProcessExitObserver(child.pid)
         _write_watchdog_ready(ready_descriptor, {"pid": child.pid})
         ready_descriptor = -1
-        while child.poll() is None:
+        while True:
+            # Observe without reaping: the unreaped session leader keeps this
+            # manager-owned PGID from being reused while descendants are killed.
+            if exit_observer.exited():
+                _terminate_process_group(child, float(shutdown_timeout))
+                break
             if stop_requested:
                 _terminate_process_group(child, float(shutdown_timeout))
                 break
@@ -1655,15 +1696,18 @@ def _watchdog_entry(keepalive_descriptor: int, config_descriptor: int, ready_des
                 continue
             _terminate_process_group(child, float(shutdown_timeout))
             break
-        return _portable_return_code(child.wait())
+        return _portable_return_code(child.returncode if child.returncode is not None else child.wait())
     except BaseException as error:
         if ready_descriptor >= 0:
             with contextlib.suppress(OSError):
                 _write_watchdog_ready(ready_descriptor, {"error": type(error).__name__})
-        if child is not None and child.poll() is None:
-            _terminate_process_group(child, 2.0)
+        if child is not None:
+            with contextlib.suppress(OSError, ChildProcessError):
+                _terminate_process_group(child, 2.0)
         return 125
     finally:
+        if exit_observer is not None:
+            exit_observer.close()
         for descriptor in (keepalive_descriptor, ready_descriptor):
             if descriptor >= 0:
                 with contextlib.suppress(OSError):
@@ -1676,20 +1720,81 @@ def _write_watchdog_ready(descriptor: int, value: dict[str, Any]) -> None:
     os.close(descriptor)
 
 
-def _terminate_process_group(process: subprocess.Popen[bytes], timeout: float) -> None:
-    if process.poll() is not None:
-        return
-    with contextlib.suppress(ProcessLookupError):
-        os.killpg(process.pid, signal.SIGTERM)
+class _ProcessExitObserver:
+    """Observe a child exit without reaping its PID/PGID ownership token."""
+
+    def __init__(self, process_id: int):
+        self.process_id = process_id
+        self._queue: Any | None = None
+        self._already_exited = False
+        if all(hasattr(os, name) for name in ("waitid", "P_PID", "WEXITED", "WNOHANG", "WNOWAIT")):
+            return
+        if not all(
+            hasattr(select, name)
+            for name in ("kqueue", "kevent", "KQ_FILTER_PROC", "KQ_NOTE_EXIT", "KQ_EV_ADD", "KQ_EV_ENABLE")
+        ):
+            raise RuntimeManagerError("This POSIX platform cannot safely observe managed process exit")
+        self._queue = select.kqueue()
+        event = select.kevent(
+            process_id,
+            filter=select.KQ_FILTER_PROC,
+            flags=select.KQ_EV_ADD | select.KQ_EV_ENABLE,
+            fflags=select.KQ_NOTE_EXIT,
+        )
+        try:
+            self._queue.control([event], 0, 0)
+        except ProcessLookupError:
+            self._already_exited = True
+
+    def exited(self) -> bool:
+        if self._already_exited:
+            return True
+        if self._queue is not None:
+            return bool(self._queue.control([], 1, 0))
+        try:
+            result = os.waitid(
+                os.P_PID,
+                self.process_id,
+                os.WEXITED | os.WNOHANG | os.WNOWAIT,
+            )
+        except ChildProcessError:
+            return True
+        return result is not None
+
+    def close(self) -> None:
+        if self._queue is not None:
+            self._queue.close()
+            self._queue = None
+
+
+def _process_group_exists(process_group_id: int) -> bool:
     try:
-        process.wait(timeout=timeout)
-        return
-    except subprocess.TimeoutExpired:
-        pass
-    with contextlib.suppress(ProcessLookupError):
-        os.killpg(process.pid, signal.SIGKILL)
-    with contextlib.suppress(subprocess.TimeoutExpired):
-        process.wait(timeout=2)
+        os.killpg(process_group_id, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # macOS can report EPERM for a group containing only an unreaped leader.
+        return True
+
+
+def _terminate_process_group(process: subprocess.Popen[bytes], timeout: float) -> None:
+    process_group_id = process.pid
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.killpg(process_group_id, signal.SIGTERM)
+    deadline = time.monotonic() + timeout
+    while _process_group_exists(process_group_id) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    if _process_group_exists(process_group_id):
+        # Signal before reaping the leader, which prevents this PGID from being
+        # reassigned to an unrelated process group during cleanup.
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(process_group_id, signal.SIGKILL)
+    process.wait()
+    # Do not release the inherited profile lock while an owned descendant can
+    # still be observed in the group. No further signals occur after reaping.
+    while _process_group_exists(process_group_id):
+        time.sleep(0.05)
 
 
 def _portable_return_code(return_code: int) -> int:
@@ -1720,6 +1825,7 @@ def _atomic_private_json(path: Path, value: dict[str, Any]) -> None:
             os.fsync(handle.fileno())
         os.replace(temporary, path)
         os.chmod(path, 0o600)
+        _fsync_directory(path.parent)
     except BaseException:
         with contextlib.suppress(FileNotFoundError):
             temporary.unlink()
