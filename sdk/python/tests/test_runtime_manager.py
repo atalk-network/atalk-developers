@@ -31,6 +31,7 @@ from atalk.runtime_manager import (
     RuntimeManager,
     RuntimeManagerError,
     UpdateStatus,
+    _WatchedProcess,
     _exclusive_lock,
     _health_response_is_ready,
     _launch_with_parent_watchdog,
@@ -260,6 +261,77 @@ def test_watchdog_cleans_same_group_descendant_after_leader_exits(tmp_path):
         if descendant_pid and _pid_exists(descendant_pid):
             with contextlib.suppress(ProcessLookupError):
                 os.kill(descendant_pid, signal.SIGKILL)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="managed process replacement is POSIX-only")
+def test_manager_never_signals_watched_process_group_directly(tmp_path, monkeypatch):
+    manager = make_manager(tmp_path, shutdown_timeout_seconds=0.2)
+    watched = _launch_with_parent_watchdog(
+        [sys.executable, "-c", "import time; time.sleep(60)"],
+        cwd=tmp_path,
+        environment=os.environ.copy(),
+        shutdown_timeout_seconds=0.2,
+        lock_descriptor=None,
+    )
+    manager_signals = []
+
+    def forbidden_killpg(*args):
+        manager_signals.append(args)
+        raise AssertionError("manager must delegate process-group signaling to watchdog")
+
+    monkeypatch.setattr("atalk.runtime_manager.os.killpg", forbidden_killpg)
+    manager.stop_process(watched)
+
+    assert manager_signals == []
+    assert watched.poll() is not None
+
+
+def test_watched_process_timeout_keeps_inherited_profile_lock(tmp_path, monkeypatch):
+    class StuckWatchdog:
+        returncode = None
+
+        def __init__(self):
+            self.timeouts = []
+
+        def poll(self):
+            return None
+
+        def wait(self, timeout=None):
+            self.timeouts.append(timeout)
+            raise subprocess.TimeoutExpired("watchdog", timeout)
+
+    manager = make_manager(tmp_path, shutdown_timeout_seconds=0.2)
+    keepalive_read, keepalive_write = os.pipe()
+    os.close(keepalive_read)
+    watchdog = StuckWatchdog()
+    watched = _WatchedProcess(123_456, watchdog, keepalive_write)
+    profile_lock = tmp_path / "manager.lock"
+    inherited_lock = -1
+    monkeypatch.setattr(
+        "atalk.runtime_manager.os.killpg",
+        lambda *_args: pytest.fail("manager must not signal a watched process group"),
+    )
+
+    try:
+        with _exclusive_lock(profile_lock) as lock_descriptor:
+            inherited_lock = os.dup(lock_descriptor)
+            with pytest.raises(RuntimeManagerError, match="remains responsible"):
+                manager.stop_process(watched)
+
+        assert watchdog.timeouts == [pytest.approx(2.2)]
+        with pytest.raises(OSError):
+            os.fstat(keepalive_write)
+        with pytest.raises(RuntimeManagerError, match="already owns"):
+            with _exclusive_lock(profile_lock):
+                pass
+
+        os.close(inherited_lock)
+        inherited_lock = -1
+        with _exclusive_lock(profile_lock):
+            pass
+    finally:
+        if inherited_lock >= 0:
+            os.close(inherited_lock)
 
 
 def test_stale_live_pid_is_never_signaled_or_duplicated(tmp_path):

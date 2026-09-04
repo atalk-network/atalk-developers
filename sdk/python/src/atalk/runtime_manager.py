@@ -54,6 +54,7 @@ MAX_RELEASE_MANIFEST_BYTES = 4 * 1024 * 1024
 MIN_HEALTH_OBSERVATIONS = 3
 MAX_MONITOR_FAILURES = 3
 POST_ACTIVATION_ROLLBACK_SECONDS = 5 * 60
+WATCHDOG_CLEANUP_SLACK_SECONDS = 2.0
 RUNTIME_RESTART_BACKOFF_SECONDS = (2, 5, 15, 60, 5 * 60)
 STAGING_BACKOFF_SECONDS = (5 * 60, 15 * 60, 60 * 60, 6 * 60 * 60)
 CANDIDATE_BACKOFF_SECONDS = (6 * 60 * 60, 24 * 60 * 60, 3 * 24 * 60 * 60, 7 * 24 * 60 * 60)
@@ -606,9 +607,30 @@ class RuntimeManager:
             return False
 
     def stop_process(self, process: ManagedProcess) -> None:
-        if process.poll() is not None:
-            if isinstance(process, _WatchedProcess):
+        if isinstance(process, _WatchedProcess):
+            if process.poll() is not None:
                 process.close_keepalive()
+                self._forget_process(process.pid)
+                return
+            # Only the watchdog owns this freshly created process group. Closing
+            # the pipe requests bounded TERM/KILL/reap cleanup without reopening
+            # a PID/PGID reuse race in the manager.
+            process.close_keepalive()
+            try:
+                process.wait(
+                    timeout=self.shutdown_timeout_seconds + WATCHDOG_CLEANUP_SLACK_SECONDS,
+                )
+            except subprocess.TimeoutExpired as error:
+                if process.poll() is None:
+                    raise RuntimeManagerError(
+                        "Runtime watchdog did not finish process-group cleanup; "
+                        "it remains responsible for the child and profile lock"
+                    ) from error
+            finally:
+                if process.poll() is not None:
+                    self._forget_process(process.pid)
+            return
+        if process.poll() is not None:
             self._forget_process(process.pid)
             return
         try:
@@ -623,10 +645,6 @@ class RuntimeManager:
                 with contextlib.suppress(subprocess.TimeoutExpired):
                     process.wait(timeout=2)
         finally:
-            if isinstance(process, _WatchedProcess):
-                process.close_keepalive()
-                with contextlib.suppress(subprocess.TimeoutExpired):
-                    process.wait(timeout=2)
             self._forget_process(process.pid)
 
     def _forget_process(self, process_id: int) -> None:
@@ -1893,7 +1911,8 @@ def _exclusive_lock(path: Path) -> Iterator[int]:
         os.fchmod(descriptor, 0o600)
         yield descriptor
     finally:
-        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        # Do not issue LOCK_UN: the watchdog inherits this open-file-description
+        # and must keep the profile locked after the manager closes its copy.
         os.close(descriptor)
 
 
