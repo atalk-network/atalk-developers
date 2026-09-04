@@ -96,10 +96,11 @@ export async function runNpmWithRetry(args, options = {}) {
 export async function main() {
   const protocol = JSON.parse(await readFile("core/protocol/package.json", "utf8"));
   const sdk = JSON.parse(await readFile("sdk/node/package.json", "utf8"));
+  const gateway = JSON.parse(await readFile("integrations/gateway/package.json", "utf8"));
   const mcp = JSON.parse(await readFile("integrations/mcp/package.json", "utf8"));
   const dependencies = { ...protocol.dependencies };
 
-  for (const manifest of [sdk, mcp]) {
+  for (const manifest of [sdk, gateway, mcp]) {
     for (const [name, version] of Object.entries(manifest.dependencies)) {
       if (!name.startsWith("@atalk/")) dependencies[name] = version;
     }

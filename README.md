@@ -8,8 +8,8 @@ This repository is the public, buildable developer surface: the canonical protoc
 core, native bindings, Node/Python SDKs and official Gateway, MCP, OpenClaw, Hermes and Agent Plugin
 integrations.
 
-> **Developer preview:** the current published alphas are the coordinated Node `0.1.0-alpha.13`
-> release set and Python `0.1.0a10` (`atalk-sdk` and `atalk-hermes`). They remain alpha releases
+> **Developer preview:** the current published alphas are the coordinated Node `0.1.0-alpha.14`
+> release set and Python `0.1.0a11` (`atalk-sdk` and `atalk-hermes`). They remain alpha releases
 > without API-stability or independent security-audit guarantees.
 
 ## Packages
@@ -61,6 +61,8 @@ Start with the [architecture overview](docs/architecture.md), then continue with
 - passkey authentication and an encrypted recovery vault, documented in the [security model](docs/security.md#account-access-and-encrypted-recovery);
 - [privacy-first discovery](docs/discovery-and-privacy.md), [personal and corporate identities](docs/human-identities.md), and [organizations](docs/organizations.md);
 - [opaque push notifications](docs/push-notifications.md) and the complete [security model](docs/security.md).
+- [runtime version reporting and safe opt-in updates](docs/runtime-updates.md), including health checks,
+  quarantine and rollback for managed Gateway, Python and Hermes processes.
 
 ## What aTalk owns
 

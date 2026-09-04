@@ -47,23 +47,23 @@ jobs:
             target: aarch64-pc-windows-msvc
             command: pnpm --dir core/node-native build --target aarch64-pc-windows-msvc
     steps:
-      - uses: actions/checkout@v7
-      - uses: pnpm/action-setup@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: pnpm/action-setup@f520eceda224fe1a4aed5a2a27a194379a409996 # v6
         with:
           version: 11.19.0
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: 24
           cache: pnpm
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           toolchain: 1.93.1
           targets: ${{ matrix.target }}
-      - uses: mlugg/setup-zig@v2
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
         if: matrix.zig == true
         with:
           version: 0.15.2
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@5bf6ce016fd2e72eefc647cbca1e4213f65955b8 # v2
         if: matrix.zig == true
         with:
           tool: cargo-zigbuild
@@ -73,7 +73,7 @@ jobs:
         run: ${{ matrix.command }}
         shell: bash
       - name: Upload native binding
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: bindings-${{ matrix.target }}
           path: core/node-native/atalk-core-native.*.node
@@ -91,11 +91,11 @@ jobs:
     env:
       NPM_CONFIG_PROVENANCE: "true"
     steps:
-      - uses: actions/checkout@v7
-      - uses: pnpm/action-setup@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: pnpm/action-setup@f520eceda224fe1a4aed5a2a27a194379a409996 # v6
         with:
           version: 11.19.0
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: 24
           registry-url: https://registry.npmjs.org
@@ -112,7 +112,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
       - name: Download native bindings
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           pattern: bindings-*
           path: core/node-native/artifacts
@@ -178,3 +178,21 @@ jobs:
           node scripts/publish-package-if-missing.mjs integrations/openclaw pnpm next
           node scripts/publish-package-if-missing.mjs integrations/mcp pnpm next
           node scripts/publish-package-if-missing.mjs integrations/agent-plugin pnpm next
+
+  release:
+    name: publish-release-notes
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Create canonical release page for the runtime advisory
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
+            gh release create "$GITHUB_REF_NAME" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "aTalk Node runtime ${GITHUB_REF_NAME#node-v}" \
+              --generate-notes \
+              --verify-tag

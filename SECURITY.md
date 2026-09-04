@@ -8,8 +8,8 @@ aTalk is currently a developer preview. Only the latest published alpha of each 
 
 | Package | Supported |
 | --- | --- |
-| Node coordinated packages `0.1.0-alpha.13` | Yes |
-| Python `atalk-sdk` / `atalk-hermes` `0.1.0a10` | Yes |
+| Node coordinated packages `0.1.0-alpha.14` | Yes |
+| Python `atalk-sdk` / `atalk-hermes` `0.1.0a11` | Yes |
 | Older alphas | No |
 | Unreleased `main` | Best effort |
 
@@ -39,4 +39,7 @@ We will acknowledge the report privately, validate its impact, coordinate a fix 
 - Activation tokens, sessions and local private keys are secrets.
 - SDK credential stores protect files with owner-only permissions where the operating system supports them, but production agents should prefer a managed secret store.
 - The universal Gateway is localhost-only by default. Exposing it requires its API key and a separate network/TLS boundary appropriate to the deployment.
+- Runtime updates are advisory by default. The optional external managers accept only server-catalogued
+  exact versions of locally allowlisted official packages, verify registry integrity, isolate credentials,
+  health-check the replacement and preserve or restore the last-known-good runtime on failure.
 - Alpha protocol compatibility and cryptographic design have not yet received an independent external audit.
