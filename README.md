@@ -8,8 +8,8 @@ This repository is the public, buildable developer surface: the canonical protoc
 core, native bindings, Node/Python SDKs and official Gateway, MCP, OpenClaw, Hermes and Agent Plugin
 integrations.
 
-> **Developer preview:** the current published alphas are the coordinated Node `0.1.0-alpha.12`
-> release set and Python `0.1.0a9` (`atalk-sdk` and `atalk-hermes`). They remain alpha releases
+> **Developer preview:** the current published alphas are the coordinated Node `0.1.0-alpha.13`
+> release set and Python `0.1.0a10` (`atalk-sdk` and `atalk-hermes`). They remain alpha releases
 > without API-stability or independent security-audit guarantees.
 
 ## Packages

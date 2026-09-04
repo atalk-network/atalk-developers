@@ -4,10 +4,10 @@
 
 The public line is intentionally marked alpha. As of 2026-09-04, the current coordinated registry releases are:
 
-- npm coordinated packages: `0.1.0-alpha.12`, distributed under the `next` tag;
-- PyPI packages `atalk-sdk` and `atalk-hermes`: `0.1.0a9`, installed with `pip --pre`.
+- npm coordinated packages: `0.1.0-alpha.13`, distributed under the `next` tag;
+- PyPI packages `atalk-sdk` and `atalk-hermes`: `0.1.0a10`, installed with `pip --pre`.
 
-Repository manifests currently contain the coordinated `0.1.0-alpha.13` / `0.1.0a10` candidate. Public documentation and product metadata continue to name registry versions until the new release is available.
+Repository manifests and public documentation now match these coordinated registry releases.
 
 During `0.x`, minor releases may contain breaking API or protocol changes. Patch releases must remain compatible with their minor line unless they fix a security defect that cannot be addressed safely otherwise.
 
